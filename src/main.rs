@@ -3,7 +3,7 @@ use std::{
     env,
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command as SystemCommand, Stdio},
 };
 
@@ -28,7 +28,8 @@ fn main() -> io::Result<()> {
         .subcommand(Command::new("edit").about("Opens the queue in an editor"))
         .get_matches();
 
-    let queue_dir = Path::new(".config/encode_queue");
+    let home_dir = env::var("HOME").expect("HOME environment variable not set");
+    let queue_dir = PathBuf::from(home_dir).join(".config/encode_queue");
     let queue_path = queue_dir.join("commands.txt");
 
     fs::create_dir_all(queue_dir)?;

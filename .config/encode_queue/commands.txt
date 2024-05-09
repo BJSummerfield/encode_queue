@@ -1,0 +1,10 @@
+echo 'task 1' && sleep 2
+echo 'task 2' && sleep 2
+echo 'task 3' && sleep 2
+echo 'task 4' && sleep 2
+echo 'task 5' && sleep 2
+echo 'task 6' && sleep 2
+echo 'task 7' && sleep 2
+echo 'task 8' && sleep 2
+echo 'task 9' && sleep 2
+echo 'task 10' && sleep 2
