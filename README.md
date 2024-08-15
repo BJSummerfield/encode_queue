@@ -1,7 +1,3 @@
-Here's a more concise version of the overview, incorporating your additional points:
-
----
-
 # Encode Queue
 
 **Version:** 1.0  
@@ -109,7 +105,3 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 ## Contact
 
 If you have any questions, feel free to reach out to me at [brianjsummerfield@gmail.com](mailto:brianjsummerfield@gmail.com).
-
----
-
-This version is more streamlined while still explaining how the queue works and the advantages of the process.
