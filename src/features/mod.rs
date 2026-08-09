@@ -1,6 +1,7 @@
 pub mod add;
 pub mod edit;
 pub mod list;
+pub mod process;
 
 #[cfg(test)]
 mod tests {
