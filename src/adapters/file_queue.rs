@@ -7,6 +7,7 @@ use std::{
     process::Command,
 };
 
+#[derive(Debug, Clone)]
 pub struct FileQueue {
     path: PathBuf,
 }
@@ -105,7 +106,6 @@ impl QueueRepository for FileQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use tempfile::TempDir;
 
     fn test_queue() -> (FileQueue, TempDir) {
