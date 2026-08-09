@@ -9,8 +9,6 @@ pub enum QueueError {
     Io(#[from] io::Error),
     #[error("HOME environment variable not set")]
     Env,
-    #[error("queue is empty")]
-    Empty,
     #[error("failed to spawn editor: {0}")]
     EditorSpawn(String),
     #[error(transparent)]
