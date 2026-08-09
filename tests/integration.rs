@@ -1,6 +1,5 @@
 use encode_queue::{
     adapters::FileQueue,
-    domain::QueueRepository,
     features,
 };
 use std::fs;
