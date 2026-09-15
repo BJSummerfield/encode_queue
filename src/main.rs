@@ -19,7 +19,7 @@ fn main() {
 
 fn run() -> Result<(), error::CliError> {
     let matches = Command::new("Encode Queue")
-        .version("1.0")
+        .version(env!("CARGO_PKG_VERSION"))
         .author("brianjsummerfield@gmail.com")
         .about("Manages a queue of commands")
         .subcommand_required(true)
