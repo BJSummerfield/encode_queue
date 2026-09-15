@@ -23,7 +23,15 @@ impl QueueRepo for FileQueueRepo {
         let file = File::open(&self.path)?;
         let lines = BufReader::new(file).lines();
         let owned: std::io::Result<Vec<String>> = lines.collect();
-        Ok(owned?.into_iter().map(QueueEntry::new).collect())
+        // CT002: convert each line at the read boundary via TryFrom (C012/P-hex).
+        // Only blank/whitespace-only lines fail validation; they are skipped (not
+        // stored as entries), preserving CT001's "skip blank line, no spawn" drain.
+        // `.ok()` is safe: the only possible error is EmptyQueueEntry.
+        let entries = owned?
+            .into_iter()
+            .filter_map(|line| QueueEntry::try_from(line.as_str()).ok())
+            .collect();
+        Ok(entries)
     }
 
     fn append_entry(&self, entry: &QueueEntry) -> std::io::Result<()> {
