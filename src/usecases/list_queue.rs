@@ -1,7 +1,6 @@
 use crate::error::CliError;
 use crate::ports::queue_repo::QueueRepo;
 
-/// Lists the queue: one entry per printed line.
 pub struct ListQueue<R: QueueRepo> {
     repo: R,
 }
