@@ -1,15 +1,22 @@
-use clap::{Arg, ArgAction, Command};
-use std::{
-    env,
-    fs::{self, File, OpenOptions},
-    io::{self, BufRead, BufReader, Write},
-    path::{Path, PathBuf},
-    process::{Command as SystemCommand, Stdio},
-};
+mod adapters;
+mod domain;
+mod error;
+mod ports;
+mod usecases;
 
-fn main() -> io::Result<()> {
+use clap::{Arg, ArgAction, Command};
+use std::{env, fs, process};
+
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("Error: {err}");
+        process::exit(1);
+    }
+}
+
+fn run() -> Result<(), error::CliError> {
     let matches = Command::new("Encode Queue")
-        .version("1.0")
+        .version(env!("CARGO_PKG_VERSION"))
         .author("brianjsummerfield@gmail.com")
         .about("Manages a queue of commands")
         .subcommand_required(true)
@@ -20,7 +27,10 @@ fn main() -> io::Result<()> {
                     Arg::new("COMMAND")
                         .help("The command to add")
                         .required(true)
-                        .action(ArgAction::Set),
+                        .action(ArgAction::Set)
+                        .value_parser(clap::builder::ValueParser::new(
+                            |s: &str| domain::entry::QueueEntry::try_from(s),
+                        )),
                 ),
         )
         .subcommand(Command::new("start").about("Starts processing the queue"))
@@ -28,89 +38,49 @@ fn main() -> io::Result<()> {
         .subcommand(Command::new("edit").about("Opens the queue in an editor"))
         .get_matches();
 
-    let home_dir = env::var("HOME").expect("HOME environment variable not set");
-    let queue_dir = PathBuf::from(home_dir).join(".config/encode_queue");
-    let queue_path = queue_dir.join("commands.txt");
+    let home = env::var_os("HOME")
+        .ok_or(domain::error::DomainError::HomeMissing)
+        .map_err(|_| error::CliError::ConfigHome)?;
+    let queue = domain::config::QueuePath::try_from(home)
+        .map_err(|_| error::CliError::ConfigHome)?;
 
-    fs::create_dir_all(queue_dir)?;
+    fs::create_dir_all(queue.dir()).map_err(|source| error::CliError::QueueWrite {
+        source,
+        path: queue.dir().to_path_buf(),
+    })?;
 
     match matches.subcommand() {
         Some(("add", sub_matches)) => {
-            let command = sub_matches.get_one::<String>("COMMAND").unwrap();
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&queue_path)?;
-            writeln!(file, "{}", command)?;
+            let command = sub_matches
+                .get_one::<domain::entry::QueueEntry>("COMMAND")
+                .ok_or(error::CliError::MissingCommand)?;
+            usecases::add_queue_entry::AddQueueEntry::new(
+                adapters::file_queue_repo::FileQueueRepo::new(queue.as_path().to_path_buf()),
+            )
+            .execute(command)?;
         }
         Some(("start", _)) => {
-            process_queue(&queue_path)?;
+            usecases::process_queue::ProcessQueue::new(
+                adapters::file_queue_repo::FileQueueRepo::new(queue.as_path().to_path_buf()),
+                adapters::fish_command_runner::FishCommandRunner,
+            )
+            .execute()?;
         }
         Some(("ls", _)) => {
-            let contents = fs::read_to_string(&queue_path)?;
-            println!("{}", contents);
+            usecases::list_queue::ListQueue::new(
+                adapters::file_queue_repo::FileQueueRepo::new(queue.as_path().to_path_buf()),
+            )
+            .execute()?;
         }
         Some(("edit", _)) => {
-            open_editor(queue_path.to_str().unwrap())?;
+            usecases::edit_queue::EditQueue::new(queue.clone()).execute()?;
         }
-        _ => unreachable!(),
-    }
-
-    Ok(())
-}
-
-fn process_queue(queue_path: &Path) -> io::Result<()> {
-    loop {
-        let file = File::open(queue_path)?;
-        let mut reader = BufReader::new(&file);
-        let mut first_line = String::new();
-        if reader.read_line(&mut first_line)? == 0 {
-            break;
-        }
-
-        if !first_line.trim().is_empty() {
-            let mut child = SystemCommand::new("fish")
-                .arg("-c")
-                .arg(first_line.trim())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .spawn()?;
-
-            child.wait()?;
-        }
-
-        let file = File::open(queue_path)?;
-        let lines = BufReader::new(&file).lines();
-        let all_lines: Vec<String> = lines.collect::<Result<_, _>>()?;
-
-        if all_lines.len() > 1 {
-            let remaining_lines = &all_lines[1..];
-
-            let mut file = OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(queue_path)?;
-            for line in remaining_lines {
-                writeln!(file, "{}", line)?;
-            }
-        } else {
-            OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(queue_path)?;
+        _ => {
+            eprintln!("error: a subcommand is required (add, start, ls or edit)");
+            eprintln!("run 'encode_queue --help' for usage");
+            process::exit(2);
         }
     }
-
-    Ok(())
-}
-
-fn open_editor(file_path: &str) -> std::io::Result<()> {
-    let editor = env::var("EDITOR").unwrap_or_else(|_| "nvim".to_string());
-
-    SystemCommand::new(editor)
-        .arg(file_path)
-        .status()
-        .expect("Failed to open editor");
 
     Ok(())
 }

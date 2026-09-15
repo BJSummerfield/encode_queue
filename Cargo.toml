@@ -2,6 +2,12 @@
 name = "encode_queue"
 version = "0.1.0"
 edition = "2021"
+description = "Encode Queue manages a queue of shell commands, executed sequentially via the Fish shell."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/BJSummerfield/encode_queue"
+rust-version = "1.85.0"
 
 [dependencies]
 clap = "4.5.4"
+thiserror = "2"
