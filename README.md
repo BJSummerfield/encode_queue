@@ -1,6 +1,5 @@
 # Encode Queue
 
-**Version:** 1.0  
 **Author:** [Brian Summerfield](mailto:brianjsummerfield@gmail.com)
 
 ## Overview
@@ -93,6 +92,33 @@ You can change the default editor by setting the `EDITOR` environment variable:
 ```sh
 export EDITOR=nvim
 ```
+
+## Architecture
+
+The binary is organized as a small hexagonal (ports & adapters) layout in a
+single crate — no workspace, no lib target:
+
+```
+src/
+  domain/    queue values and invariants (QueueEntry, QueuePath, Editor, DomainError)
+  ports/     outbound ports (QueueRepo, CommandRunner) as traits consumed as generic parameters
+  usecases/  application steps (add, start, ls, edit) — generic over the ports (edit has none by design)
+  adapters/  the real I/O (file-backed queue, Fish command runner)
+  error.rs   the single public thiserror error (CliError) at the binary edge
+  main.rs    thin entry point and composition root
+```
+
+- **Domain purity**: `domain/` performs no I/O and its values hold only std
+  types; every *data* value is constructed or read through `TryFrom`, so each
+  boundary converts *into* the domain and edges just call `try_from`.
+- **No dynamic dispatch**: ports are traits used only as generic parameters —
+  no `dyn`/trait objects anywhere; the single public `thiserror` `CliError`
+  enum (no `anyhow`) carries terse messages at the CLI edge.
+- **Adapters do the I/O** (queue read/write, Fish command runner) and map OS
+  errors onto the public error, with path context where a path exists; the
+  `edit` use case spawns its editor directly. `main.rs` parses arguments
+  (clap), creates the queue directory, wires the adapters, and maps results
+  to exit codes: 0 success, 1 runtime error, 2 usage.
 
 ## Contributing
 
