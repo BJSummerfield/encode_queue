@@ -1,6 +1,5 @@
-use std::io;
-
 use crate::domain::entry::QueueEntry;
+use crate::error::CliError;
 use crate::ports::queue_repo::QueueRepo;
 
 /// Adds one command to the queue.
@@ -13,7 +12,7 @@ impl<R: QueueRepo> AddQueueEntry<R> {
         Self { repo }
     }
 
-    pub fn execute(&self, entry: &QueueEntry) -> io::Result<()> {
+    pub fn execute(&self, entry: &QueueEntry) -> Result<(), CliError> {
         self.repo.append_entry(entry)
     }
 }

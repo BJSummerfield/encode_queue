@@ -1,42 +1,23 @@
 mod adapters;
 mod domain;
+mod error;
 mod ports;
 mod usecases;
 
 use clap::{Arg, ArgAction, Command};
-use std::{env, fs, io};
+use std::{env, fs, process};
 
-/// CT002→CT003 staging seam: the binary-edge error for the intermediate state.
-///
-/// CT003 replaces this with the public `CliError` (`src/error.rs`), adds the
-/// `main()`/`run()` split, and explicit exit codes. For now it keeps `main()`
-/// concrete (no trait object — P-disp) and removes the three CT002 panics.
-#[derive(thiserror::Error)]
-enum RunError {
-    /// A domain conversion/config error.
-    #[error(transparent)]
-    Domain(#[from] domain::error::DomainError),
-
-    /// An I/O error from a use case or `create_dir_all`.
-    #[error(transparent)]
-    Io(#[from] io::Error),
-
-    /// A required argument was somehow missing (defensive; `required(true)`
-    /// makes this unreachable after a successful parse).
-    #[error("missing required argument: COMMAND")]
-    MissingCommand,
-}
-
-// `Termination for Result` (main -> Result) prints the error with `{:?}` —
-// Debug, not Display. Format Debug via Display so users see the typed
-// message (plan §5), e.g. `Error: HOME environment variable is not set`.
-impl std::fmt::Debug for RunError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self}")
+/// Thin entry point: print the terse error message (C032: only the variant's
+/// `#[error]` text, never a raw source) and map to explicit exit codes
+/// (0 success, 1 runtime error, 2 usage — panics remain reserved for 101).
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("Error: {err}");
+        process::exit(1);
     }
 }
 
-fn main() -> Result<(), RunError> {
+fn run() -> Result<(), error::CliError> {
     let matches = Command::new("Encode Queue")
         .version("1.0")
         .author("brianjsummerfield@gmail.com")
@@ -61,22 +42,31 @@ fn main() -> Result<(), RunError> {
         .subcommand(Command::new("start").about("Starts processing the queue"))
         .subcommand(Command::new("ls").about("Lists all commands in the queue"))
         .subcommand(Command::new("edit").about("Opens the queue in an editor"))
-        .get_matches();
+        .get_matches(); // exits 2 on usage errors (clap's own edge)
 
-    // CT002: typed config boundary (was `env::var("HOME").expect(...)`).
-    let home = env::var_os("HOME").ok_or(RunError::Domain(
-        domain::error::DomainError::HomeMissing,
-    ))?;
-    let queue = domain::config::QueuePath::try_from(home)?;
+    // Typed config boundary (CT002): the only reachable domain errors here
+    // are HomeMissing / HomeNotUtf8 / QueuePathNotUtf8 (the last is
+    // unreachable in practice); all map to the single public ConfigHome
+    // class (plan D2).
+    let home = env::var_os("HOME")
+        .ok_or(domain::error::DomainError::HomeMissing)
+        .map_err(|_| error::CliError::ConfigHome)?;
+    let queue = domain::config::QueuePath::try_from(home)
+        .map_err(|_| error::CliError::ConfigHome)?;
 
-    // Runs for every subcommand (incl. `edit`) — preserved exactly.
-    fs::create_dir_all(queue.dir())?;
+    // Runs for every subcommand (incl. `edit`) — preserved exactly. The
+    // directory-creation io::Error maps to QueueWrite with the directory
+    // path (plan D3).
+    fs::create_dir_all(queue.dir()).map_err(|source| error::CliError::QueueWrite {
+        source,
+        path: queue.dir().to_path_buf(),
+    })?;
 
     match matches.subcommand() {
         Some(("add", sub_matches)) => {
             let command = sub_matches
                 .get_one::<domain::entry::QueueEntry>("COMMAND")
-                .ok_or(RunError::MissingCommand)?; // was .unwrap()
+                .ok_or(error::CliError::MissingCommand)?;
             usecases::add_queue_entry::AddQueueEntry::new(
                 adapters::file_queue_repo::FileQueueRepo::new(queue.as_path().to_path_buf()),
             )
@@ -98,7 +88,15 @@ fn main() -> Result<(), RunError> {
         Some(("edit", _)) => {
             usecases::edit_queue::EditQueue::new(queue.clone()).execute()?;
         }
-        _ => unreachable!(), // CT003 owns this (public CliError / run split).
+        // Unreachable with subcommand_required(true) (clap exits 2 first),
+        // and no other subcommand names exist (clap rejects unknown ones
+        // before this point), but must not panic (C004): route to a usage
+        // error, exit 2 (plan D4). The wildcard keeps the match exhaustive.
+        _ => {
+            eprintln!("error: a subcommand is required (add, start, ls or edit)");
+            eprintln!("run 'encode_queue --help' for usage");
+            process::exit(2);
+        }
     }
 
     Ok(())

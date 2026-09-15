@@ -26,3 +26,17 @@ impl TryFrom<&str> for QueueEntry {
         Ok(Self(value.to_string()))
     }
 }
+
+/// The wrapped value verbatim.
+impl std::fmt::Display for QueueEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Access the wrapped value as `&str`.
+impl std::convert::AsRef<str> for QueueEntry {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
