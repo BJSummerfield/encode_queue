@@ -6,10 +6,6 @@ use crate::domain::entry::QueueEntry;
 use crate::error::CliError;
 use crate::ports::queue_repo::QueueRepo;
 
-/// File-backed queue: one entry per line at the configured path
-/// (`~/.config/encode_queue/commands.txt`), created by `main`'s
-/// `create_dir_all` exactly as today. Every `io::Error` is mapped at its
-/// origin to the public error carrying the queue path as context (plan D1).
 pub struct FileQueueRepo {
     path: PathBuf,
 }
@@ -32,10 +28,6 @@ impl QueueRepo for FileQueueRepo {
             source,
             path: self.path.clone(),
         })?;
-        // CT002: convert each line at the read boundary via TryFrom (C012/P-hex).
-        // Only blank/whitespace-only lines fail validation; they are skipped (not
-        // stored as entries), preserving CT001's "skip blank line, no spawn" drain.
-        // `.ok()` is safe: the only possible error is EmptyQueueEntry.
         let entries = owned
             .into_iter()
             .filter_map(|line| QueueEntry::try_from(line.as_str()).ok())
@@ -60,7 +52,6 @@ impl QueueRepo for FileQueueRepo {
     }
 
     fn replace_with_remaining(&self, remaining: &[QueueEntry]) -> Result<(), CliError> {
-        // write+truncate (no create), as the current truncate branch.
         let mut file = OpenOptions::new()
             .write(true)
             .truncate(true)
