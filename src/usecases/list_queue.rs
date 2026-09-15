@@ -1,5 +1,4 @@
-use std::io;
-
+use crate::error::CliError;
 use crate::ports::queue_repo::QueueRepo;
 
 /// Lists the queue: one entry per printed line.
@@ -12,7 +11,7 @@ impl<R: QueueRepo> ListQueue<R> {
         Self { repo }
     }
 
-    pub fn execute(&self) -> io::Result<()> {
+    pub fn execute(&self) -> Result<(), CliError> {
         for entry in self.repo.read_entries()? {
             println!("{}", entry.as_str());
         }

@@ -3,11 +3,13 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 
 use crate::domain::entry::QueueEntry;
+use crate::error::CliError;
 use crate::ports::queue_repo::QueueRepo;
 
 /// File-backed queue: one entry per line at the configured path
 /// (`~/.config/encode_queue/commands.txt`), created by `main`'s
-/// `create_dir_all` exactly as today.
+/// `create_dir_all` exactly as today. Every `io::Error` is mapped at its
+/// origin to the public error carrying the queue path as context (plan D1).
 pub struct FileQueueRepo {
     path: PathBuf,
 }
@@ -19,32 +21,59 @@ impl FileQueueRepo {
 }
 
 impl QueueRepo for FileQueueRepo {
-    fn read_entries(&self) -> std::io::Result<Vec<QueueEntry>> {
-        let file = File::open(&self.path)?;
+    fn read_entries(&self) -> Result<Vec<QueueEntry>, CliError> {
+        let file = File::open(&self.path).map_err(|source| CliError::QueueRead {
+            source,
+            path: self.path.clone(),
+        })?;
         let lines = BufReader::new(file).lines();
         let owned: std::io::Result<Vec<String>> = lines.collect();
+        let owned = owned.map_err(|source| CliError::QueueRead {
+            source,
+            path: self.path.clone(),
+        })?;
         // CT002: convert each line at the read boundary via TryFrom (C012/P-hex).
         // Only blank/whitespace-only lines fail validation; they are skipped (not
         // stored as entries), preserving CT001's "skip blank line, no spawn" drain.
         // `.ok()` is safe: the only possible error is EmptyQueueEntry.
-        let entries = owned?
+        let entries = owned
             .into_iter()
             .filter_map(|line| QueueEntry::try_from(line.as_str()).ok())
             .collect();
         Ok(entries)
     }
 
-    fn append_entry(&self, entry: &QueueEntry) -> std::io::Result<()> {
-        let mut file = OpenOptions::new().create(true).append(true).open(&self.path)?;
-        writeln!(file, "{}", entry.as_str())?;
+    fn append_entry(&self, entry: &QueueEntry) -> Result<(), CliError> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|source| CliError::QueueWrite {
+                source,
+                path: self.path.clone(),
+            })?;
+        writeln!(file, "{}", entry.as_str()).map_err(|source| CliError::QueueWrite {
+            source,
+            path: self.path.clone(),
+        })?;
         Ok(())
     }
 
-    fn replace_with_remaining(&self, remaining: &[QueueEntry]) -> std::io::Result<()> {
+    fn replace_with_remaining(&self, remaining: &[QueueEntry]) -> Result<(), CliError> {
         // write+truncate (no create), as the current truncate branch.
-        let mut file = OpenOptions::new().write(true).truncate(true).open(&self.path)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&self.path)
+            .map_err(|source| CliError::QueueWrite {
+                source,
+                path: self.path.clone(),
+            })?;
         for line in remaining {
-            writeln!(file, "{}", line.as_str())?;
+            writeln!(file, "{}", line.as_str()).map_err(|source| CliError::QueueWrite {
+                source,
+                path: self.path.clone(),
+            })?;
         }
         Ok(())
     }

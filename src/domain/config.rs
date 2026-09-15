@@ -49,6 +49,20 @@ impl TryFrom<OsString> for QueuePath {
     }
 }
 
+/// The wrapped value verbatim.
+impl std::fmt::Display for QueuePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Access the wrapped value as `&str`.
+impl std::convert::AsRef<str> for QueuePath {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
 /// The validated editor program name (`$EDITOR`, or the `"nvim"` default).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Editor(String);
@@ -68,5 +82,19 @@ impl TryFrom<OsString> for Editor {
     fn try_from(value: OsString) -> Result<Self, Self::Error> {
         let s = value.into_string().map_err(DomainError::EditorNotUtf8)?;
         Ok(Self(s))
+    }
+}
+
+/// The wrapped value verbatim.
+impl std::fmt::Display for Editor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Access the wrapped value as `&str`.
+impl std::convert::AsRef<str> for Editor {
+    fn as_ref(&self) -> &str {
+        &self.0
     }
 }
