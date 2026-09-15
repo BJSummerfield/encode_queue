@@ -2,7 +2,6 @@ use crate::domain::entry::QueueEntry;
 use crate::error::CliError;
 use crate::ports::queue_repo::QueueRepo;
 
-/// Adds one command to the queue.
 pub struct AddQueueEntry<R: QueueRepo> {
     repo: R,
 }
