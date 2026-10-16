@@ -16,12 +16,14 @@
 //! verbatim from the legacy binary so help/usage/error output stays
 //! byte-identical.
 //!
-//! Error mapping: every failure becomes one of the three `CliError` variants
+//! Error mapping: every failure becomes one of the four `CliError` variants
 //! — `BadCommand` (a raw argument failed `QueueEntry::from_str`; the lenient
 //! P5 constructor never fails, so this is wired for the deferred
 //! strict-constructor path), `MissingArgument` (a required argument was
 //! absent from the parsed matches — the V-ERR-02 `unwrap`-free replacement),
-//! and `Service` (`#[from] QueueError`). Display strings are not the API
+//! `Locked` (the service's start lock is held by another live process,
+//! P6.F4; exit 3 at the boundary), and `Service` (`#[from] QueueError`).
+//! Display strings are not the API
 //! (ERR-05); WP10 maps the variants to messages and exit codes. There is no
 //! I/O variant: the `ls` dispatch writes through the `print!` macro, which
 //! swallows write errors, precisely like the legacy `println!` macro.
@@ -37,13 +39,14 @@ use crate::domain::queue::service::{QueueError, QueueService};
 use crate::domain::queue::{QueueEntry, QueueEntryError, QueueEntryIndex, QueuePath};
 use crate::ports::command_runner::CommandRunner;
 use crate::ports::editor::EditorLauncher;
+use crate::ports::queue_lock::{LockError, QueueLock};
 use crate::ports::queue_store::QueueStore;
 use std::str::FromStr;
 
 /// The inbound CLI adapter: clap parsing at the boundary plus dispatch to
 /// the queue service.
-pub struct Cli<R: QueueStore, C: CommandRunner, E: EditorLauncher> {
-    service: QueueService<R, C, E>,
+pub struct Cli<R: QueueStore, C: CommandRunner, E: EditorLauncher, L: QueueLock> {
+    service: QueueService<R, C, E, L>,
     /// The queue-file path, injected by the caller (`Config` is the single
     /// origin, V-ARCH-05) and used only by the `edit` dispatch.
     queue_path: QueuePath,
@@ -51,7 +54,7 @@ pub struct Cli<R: QueueStore, C: CommandRunner, E: EditorLauncher> {
 
 /// Errors surfaced by the inbound CLI adapter.
 ///
-/// Exactly three variants (ERR-02: one enum per boundary). Display strings
+/// Exactly four variants (ERR-02: one enum per boundary). Display strings
 /// are not the API (ERR-05): WP10 maps these variants to messages and exit
 /// codes.
 #[derive(Debug, thiserror::Error)]
@@ -62,19 +65,23 @@ pub enum CliError {
     /// A required argument was not present in the parsed matches.
     #[error("missing required argument: {0}")]
     MissingArgument(String),
+    /// Another process holds the start lock.
+    #[error("queue already running (pid {pid})")]
+    Locked { pid: u32 },
     /// The service layer reported an error.
     #[error(transparent)]
     Service(#[from] QueueError),
 }
 
-impl<R, C, E> Cli<R, C, E>
+impl<R, C, E, L> Cli<R, C, E, L>
 where
     R: QueueStore,
     C: CommandRunner,
     E: EditorLauncher,
+    L: QueueLock,
 {
     /// Wire the service and the queue path into the CLI adapter.
-    pub fn new(service: QueueService<R, C, E>, queue_path: QueuePath) -> Self {
+    pub fn new(service: QueueService<R, C, E, L>, queue_path: QueuePath) -> Self {
         Self {
             service,
             queue_path,
@@ -116,7 +123,14 @@ where
                 // (exit 1 through the existing `CliError::Service` mapping —
                 // no new `CliError` variant).
                 let stop_on_error = sub.get_flag("stop_on_error");
-                Ok(self.service.start(stop_on_error)?)
+                match self.service.start(stop_on_error) {
+                    Ok(()) => Ok(()),
+                    // P6.F4: a held start lock is its own variant (exit 3 at
+                    // the boundary); every other service error — including
+                    // lock I/O failures — stays `CliError::Service`.
+                    Err(QueueError::Lock(LockError::HeldBy(pid))) => Err(CliError::Locked { pid }),
+                    Err(e) => Err(CliError::Service(e)),
+                }
             }
             "ls" => {
                 // Optional single `-n`/`--numbered` flag; the clap builder
@@ -430,12 +444,50 @@ mod tests {
         }
     }
 
+    /// `QueueLock` mock (P6.F4): records `acquire`/`release` call counts and
+    /// returns the one-shot scripted `acquire_fail` error (consumed on the
+    /// first `acquire` call). No lock file is touched.
+    struct MockLock {
+        acquire_calls: Mutex<u64>,
+        release_calls: Mutex<u64>,
+        acquire_fail: Mutex<Option<LockError>>,
+    }
+
+    fn poisoned_lock_error<E>(_e: PoisonError<E>) -> LockError {
+        LockError::Io(std::io::Error::other("test mutex poisoned"))
+    }
+
+    impl QueueLock for MockLock {
+        fn acquire(&self) -> Result<(), LockError> {
+            *self.acquire_calls.lock().map_err(poisoned_lock_error)? += 1;
+            self.acquire_fail
+                .lock()
+                .map_err(poisoned_lock_error)?
+                .take()
+                .map_or(Ok(()), Err)
+        }
+
+        fn release(&self) -> Result<(), LockError> {
+            *self.release_calls.lock().map_err(poisoned_lock_error)? += 1;
+            Ok(())
+        }
+    }
+
+    fn mock_lock() -> MockLock {
+        MockLock {
+            acquire_calls: Mutex::new(0),
+            release_calls: Mutex::new(0),
+            acquire_fail: Mutex::new(None),
+        }
+    }
+
     fn make_cli(
         store: MockStore,
         runner: MockRunner,
         editor: MockEditor,
-    ) -> Cli<MockStore, MockRunner, MockEditor> {
-        let service = QueueService::new(store, runner, editor);
+        lock: MockLock,
+    ) -> Cli<MockStore, MockRunner, MockEditor, MockLock> {
+        let service = QueueService::new(store, runner, editor, lock);
         Cli::new(service, test_queue_path())
     }
 
@@ -448,6 +500,7 @@ mod tests {
                 expected: None,
                 fail: false,
             },
+            mock_lock(),
         );
         let matches = command().try_get_matches_from(["encode-queue", "add", "  nix build .  "])?;
 
@@ -473,6 +526,7 @@ mod tests {
                 expected: None,
                 fail: false,
             },
+            mock_lock(),
         );
         let matches = command().try_get_matches_from(["encode-queue", "start"])?;
 
@@ -515,6 +569,7 @@ mod tests {
                 expected: Some(path.clone()),
                 fail: false,
             },
+            mock_lock(),
         );
         let matches = command().try_get_matches_from(["encode-queue", "edit"])?;
 
@@ -545,6 +600,7 @@ mod tests {
                 expected: None,
                 fail: false,
             },
+            mock_lock(),
         );
         let matches = command().try_get_matches_from(["encode-queue", "ls"])?;
 
@@ -565,6 +621,7 @@ mod tests {
                 expected: None,
                 fail: false,
             },
+            mock_lock(),
         );
         let matches = command().try_get_matches_from(["encode-queue", "start"])?;
 
@@ -591,11 +648,72 @@ mod tests {
                 expected: None,
                 fail: true,
             },
+            mock_lock(),
         );
         let matches = command().try_get_matches_from(["encode-queue", "edit"])?;
 
         let err = cli.dispatch(&matches);
         assert!(matches!(err, Err(CliError::Service(QueueError::Editor(_)))));
+        Ok(())
+    }
+
+    /// P6.F4: a held start lock (`HeldBy(7)`) maps to the `Locked` variant
+    /// (exit 3 at the boundary) and the drain never runs.
+    #[test]
+    fn cli_maps_held_start_lock_to_locked_variant() -> Result<(), TestError> {
+        let cli = make_cli(
+            store(vec![queue_entry("cmd")?]),
+            runner(None),
+            MockEditor {
+                expected: None,
+                fail: false,
+            },
+            MockLock {
+                acquire_calls: Mutex::new(0),
+                release_calls: Mutex::new(0),
+                acquire_fail: Mutex::new(Some(LockError::HeldBy(7))),
+            },
+        );
+        let matches = command().try_get_matches_from(["encode-queue", "start"])?;
+
+        let err = cli.dispatch(&matches);
+        assert!(matches!(
+            err,
+            Err(CliError::Locked { pid }) if pid == 7
+        ));
+
+        // The drain never ran: the queue is unchanged and nothing was
+        // executed.
+        assert_eq!(cli.service.ls()?.len(), 1);
+        Ok(())
+    }
+
+    /// P6.F4: a lock I/O failure (acquire or release) stays a `Service`
+    /// error — only `HeldBy` takes the `Locked` arm.
+    #[test]
+    fn cli_maps_lock_io_failure_to_service_variant() -> Result<(), TestError> {
+        let cli = make_cli(
+            store(vec![queue_entry("cmd")?]),
+            runner(None),
+            MockEditor {
+                expected: None,
+                fail: false,
+            },
+            MockLock {
+                acquire_calls: Mutex::new(0),
+                release_calls: Mutex::new(0),
+                acquire_fail: Mutex::new(Some(LockError::Io(std::io::Error::other(
+                    "lock I/O failed",
+                )))),
+            },
+        );
+        let matches = command().try_get_matches_from(["encode-queue", "start"])?;
+
+        let err = cli.dispatch(&matches);
+        assert!(matches!(
+            err,
+            Err(CliError::Service(QueueError::Lock(LockError::Io(_))))
+        ));
         Ok(())
     }
 
@@ -612,6 +730,7 @@ mod tests {
                 expected: None,
                 fail: false,
             },
+            mock_lock(),
         );
         let matches = command().try_get_matches_from(["encode-queue", "rm", "2"])?;
 
@@ -637,6 +756,7 @@ mod tests {
                     expected: None,
                     fail: false,
                 },
+                mock_lock(),
             );
             let matches = command().try_get_matches_from(["encode-queue", "rm", n])?;
 
@@ -664,6 +784,7 @@ mod tests {
                 expected: None,
                 fail: false,
             },
+            mock_lock(),
         );
         let matches = command().try_get_matches_from(["encode-queue", "rm", "4"])?;
 

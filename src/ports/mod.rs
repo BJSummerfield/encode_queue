@@ -13,4 +13,5 @@
 pub mod command_runner;
 pub mod dispatch;
 pub mod editor;
+pub mod queue_lock;
 pub mod queue_store;
