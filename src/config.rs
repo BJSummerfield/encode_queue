@@ -106,7 +106,9 @@ pub enum ConfigError {
     #[error("HOME environment variable is not set")]
     HomeUnset,
     /// `ENCODE_QUEUE_DIR` is set but is not valid Unicode, so it cannot be
-    /// used as the queue directory.
+    /// used as the queue directory. Routed through `main`'s generic
+    /// config-error arm: the message is printed and the process exits with
+    /// 1 (same treatment as `HomeUnset`); no dedicated exit-code policy.
     #[error("ENCODE_QUEUE_DIR is not valid Unicode")]
     QueueDirInvalid,
 }
