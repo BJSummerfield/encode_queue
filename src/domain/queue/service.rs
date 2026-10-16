@@ -192,11 +192,11 @@ where
                     Err(RunError::Waited { code }) => {
                         // Non-zero exit: log the failure, remove the entry,
                         // then either continue or stop (binding order).
-                        self.store.append_failure(&FailureRecord {
-                            timestamp: unix_now(),
-                            exit_code: code,
-                            command: trimmed.clone(),
-                        })?;
+                        self.store.append_failure(&FailureRecord::new(
+                            unix_now(),
+                            code,
+                            trimmed.clone(),
+                        ))?;
                         self.store.drop_first()?;
                         if stop_on_error {
                             return Err(QueueError::StoppedOnFailure);
@@ -634,15 +634,15 @@ mod tests {
         // trimmed entry that was executed.
         let failures = service.store.failures.lock().unwrap();
         assert_eq!(failures.len(), 1);
-        assert_eq!(failures[0].exit_code, 3);
-        assert_eq!(failures[0].command.as_str(), "cmd");
+        assert_eq!(failures[0].exit_code(), 3);
+        assert_eq!(failures[0].command().as_str(), "cmd");
         // Timestamp within a sane window around the test (no exact
         // wall-clock assertion).
         let after = now_secs();
         assert!(
-            failures[0].timestamp >= before && failures[0].timestamp <= after,
+            failures[0].timestamp() >= before && failures[0].timestamp() <= after,
             "recorded {} outside [{before}, {after}]",
-            failures[0].timestamp
+            failures[0].timestamp()
         );
         drop(failures);
 
@@ -695,8 +695,8 @@ mod tests {
 
         let failures = service.store.failures.lock().unwrap();
         assert_eq!(failures.len(), 1);
-        assert_eq!(failures[0].exit_code, 1);
-        assert_eq!(failures[0].command.as_str(), "cmd");
+        assert_eq!(failures[0].exit_code(), 1);
+        assert_eq!(failures[0].command().as_str(), "cmd");
         drop(failures);
         assert_eq!(*service.store.drop_calls.lock().unwrap(), 1);
 

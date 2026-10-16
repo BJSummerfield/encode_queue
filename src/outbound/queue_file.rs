@@ -153,9 +153,9 @@ impl QueueStore for FileQueueStore {
         writeln!(
             file,
             "{}\t{}\t{}",
-            record.timestamp,
-            record.exit_code,
-            record.command.as_str()
+            record.timestamp(),
+            record.exit_code(),
+            record.command().as_str()
         )
         .map_err(QueueStoreError::Io)
     }
@@ -270,11 +270,7 @@ mod tests {
     }
 
     fn failure(id: u64, exit_code: i32, command: &str) -> FailureRecord {
-        FailureRecord {
-            timestamp: id,
-            exit_code,
-            command: QueueEntry::from_str(command).unwrap(),
-        }
+        FailureRecord::new(id, exit_code, QueueEntry::from_str(command).unwrap())
     }
 
     /// P6.F3: one `append_failure` creates the failure log in the queue

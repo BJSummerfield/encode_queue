@@ -111,7 +111,7 @@ impl Config {
         // name (carrying the input).
         let shell = match shell.and_then(OsStr::to_str) {
             Some(name) if !name.trim().is_empty() => {
-                Shell::new(name).map_err(|e| ConfigError::ShellInvalid(e.input))?
+                Shell::new(name).map_err(|e| ConfigError::ShellInvalid(e.input().to_owned()))?
             }
             Some(_) => Shell::Fish,
             None => match shell {
