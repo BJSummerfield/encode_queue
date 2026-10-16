@@ -1,4 +1,5 @@
-//! `QueueStore` port: read, append, and rewrite the queue file.
+//! `QueueStore` port: read, append, and rewrite the queue file, plus
+//! failure logging (`append_failure` → the store's failure log, P6.F3).
 //!
 //! The trait signature is final: it takes only domain newtypes and returns
 //! only `QueueStoreError` (ARCH-03). The store owns its `QueuePath`, so no
@@ -6,6 +7,7 @@
 
 use std::path::PathBuf;
 
+use crate::domain::failure::FailureRecord;
 use crate::domain::queue::QueueEntry;
 
 /// Errors surfaced at the queue-store boundary.
@@ -35,6 +37,13 @@ pub trait QueueStore {
 
     /// Replace the entire queue with `entries` (truncate + rewrite).
     fn write_all(&self, entries: &[QueueEntry]) -> Result<(), QueueStoreError>;
+
+    /// Append one failure record to the store's failure log (P6.F3).
+    ///
+    /// Called by the service when a queued command exits non-zero,
+    /// before the failed entry is removed from the queue. I/O failures map
+    /// to the existing `Io` catch-all (no new error variant, ERR-04).
+    fn append_failure(&self, record: &FailureRecord) -> Result<(), QueueStoreError>;
 }
 
 #[cfg(test)]

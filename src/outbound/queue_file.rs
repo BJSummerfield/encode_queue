@@ -15,9 +15,10 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use crate::domain::failure::FailureRecord;
 use crate::domain::queue::{QueueEntry, QueuePath};
 use crate::ports::queue_store::{QueueStore, QueueStoreError};
 
@@ -41,6 +42,22 @@ fn map_io_error(path: &Path, err: std::io::Error) -> QueueStoreError {
         QueueStoreError::QueueFileMissing(path.to_path_buf())
     } else {
         QueueStoreError::Io(err)
+    }
+}
+
+/// The failure-log file name, living ONLY in this adapter (acceptance
+/// grep): every other layer talks about "the failure log" without naming
+/// the file.
+const FAILURE_LOG_FILE: &str = "failed.txt";
+
+/// The directory holding the failure log: the parent directory of the
+/// stored queue path — the same convention the store already uses for the
+/// queue file itself. A queue path with no parent maps to the current
+/// directory (no `unwrap`; GEN-01).
+fn queue_dir(path: &Path) -> Result<PathBuf, QueueStoreError> {
+    match path.parent() {
+        Some(parent) => Ok(parent.to_path_buf()),
+        None => Ok(std::env::current_dir().map_err(QueueStoreError::Io)?),
     }
 }
 
@@ -114,6 +131,33 @@ impl QueueStore for FileQueueStore {
             writeln!(file, "{}", entry).map_err(QueueStoreError::Io)?;
         }
         Ok(())
+    }
+
+    /// Append one failure record to the failure log in the queue directory:
+    /// open the log with `create(true).append(true)` (append semantics, same
+    /// as `append`) and write exactly one
+    /// `<unix_ts>\t<exit_code>\t<command>\n` line (P6.F3).
+    ///
+    /// The queue directory is the parent of the stored queue path (a queue
+    /// path with no parent maps to the current directory); the queue file
+    /// itself is never touched. A missing parent directory surfaces as
+    /// `QueueFileMissing` via `map_io_error`; any other I/O failure is the
+    /// `Io` catch-all (ERR-04).
+    fn append_failure(&self, record: &FailureRecord) -> Result<(), QueueStoreError> {
+        let dir = queue_dir(self.path.as_path())?;
+        let path = dir.join(FAILURE_LOG_FILE);
+        let mut file = match OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(file) => file,
+            Err(err) => return Err(map_io_error(&path, err)),
+        };
+        writeln!(
+            file,
+            "{}\t{}\t{}",
+            record.timestamp,
+            record.exit_code,
+            record.command.as_str()
+        )
+        .map_err(QueueStoreError::Io)
     }
 }
 
@@ -223,5 +267,98 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "");
 
         let _ = fs::remove_file(&path);
+    }
+
+    fn failure(id: u64, exit_code: i32, command: &str) -> FailureRecord {
+        FailureRecord {
+            timestamp: id,
+            exit_code,
+            command: QueueEntry::from_str(command).unwrap(),
+        }
+    }
+
+    /// P6.F3: one `append_failure` creates the failure log in the queue
+    /// directory (the parent of the queue path) with exactly one
+    /// `<unix_ts>\t<exit_code>\t<command>\n` line — asserted as raw bytes for
+    /// a known record.
+    #[test]
+    fn append_failure_creates_failure_log_with_exact_line_format() {
+        let path = temp_queue_path();
+        let queue = store(&path);
+        let log = path.parent().unwrap().join("failed.txt");
+        assert!(!log.exists());
+
+        queue
+            .append_failure(&failure(1_700_000_000, 3, "false"))
+            .unwrap();
+
+        assert_eq!(fs::read(&log).unwrap(), b"1700000000\t3\tfalse\n");
+
+        let _ = fs::remove_file(&log);
+    }
+
+    /// P6.F3: two appends both present, in call order (append semantics,
+    /// never truncate).
+    #[test]
+    fn append_failure_twice_keeps_both_lines_in_order() {
+        let path = temp_queue_path();
+        let queue = store(&path);
+        let log = path.parent().unwrap().join("failed.txt");
+
+        queue
+            .append_failure(&failure(1_700_000_000, 1, "false"))
+            .unwrap();
+        queue
+            .append_failure(&failure(1_700_000_001, 2, "exit 2"))
+            .unwrap();
+
+        assert_eq!(
+            fs::read(&log).unwrap(),
+            b"1700000000\t1\tfalse\n1700000001\t2\texit 2\n"
+        );
+
+        let _ = fs::remove_file(&log);
+    }
+
+    /// P6.F3: `append_failure` never touches the queue file itself — its
+    /// bytes are identical before and after, and the queue's `read_all`
+    /// still sees exactly the original entries.
+    #[test]
+    fn append_failure_leaves_the_queue_file_untouched() {
+        let path = temp_queue_path();
+        fs::write(&path, "one\ntwo\n").unwrap();
+        let queue = store(&path);
+
+        queue
+            .append_failure(&failure(1_700_000_000, 1, "one"))
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "one\ntwo\n");
+        let entries = queue.read_all().unwrap();
+        let lines: Vec<&str> = entries.iter().map(QueueEntry::as_str).collect();
+        assert_eq!(lines, vec!["one", "two"]);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.parent().unwrap().join("failed.txt"));
+    }
+
+    /// P6.F3: a queue path whose parent directory does not exist cannot be
+    /// appended to: opening the failure log fails `NotFound` and is
+    /// classified as `QueueFileMissing` carrying the (missing) queue
+    /// directory (ERR-04: no new error variant).
+    #[test]
+    fn append_failure_in_missing_parent_directory_is_queue_file_missing() {
+        let path = temp_queue_path();
+        let queue_dir = path.parent().unwrap().to_path_buf();
+        fs::remove_dir(&queue_dir).unwrap(); // the queue path's parent is gone
+        let queue = store(&path);
+
+        let err = queue.append_failure(&failure(1, 1, "cmd")).unwrap_err();
+        // `map_io_error` classifies against the path it tried to open —
+        // the log file inside the missing queue directory.
+        assert!(matches!(
+            err,
+            QueueStoreError::QueueFileMissing(missing) if missing == queue_dir.join("failed.txt")
+        ));
     }
 }

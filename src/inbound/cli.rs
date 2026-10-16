@@ -110,7 +110,14 @@ where
                 self.service.add(&entry)?;
                 Ok(())
             }
-            "start" => Ok(self.service.start()?),
+            "start" => {
+                // Optional `--stop-on-error` flag (P6.F3): when set, a failed
+                // command stops `start` with `QueueError::StoppedOnFailure`
+                // (exit 1 through the existing `CliError::Service` mapping —
+                // no new `CliError` variant).
+                let stop_on_error = sub.get_flag("stop_on_error");
+                Ok(self.service.start(stop_on_error)?)
+            }
             "ls" => {
                 // Optional single `-n`/`--numbered` flag; the clap builder
                 // rejects any other token with a usage error (exit 2) itself.
@@ -182,7 +189,16 @@ fn command() -> Command {
                         .action(ArgAction::Set),
                 ),
         )
-        .subcommand(Command::new("start").about("Starts processing the queue"))
+        .subcommand(
+            Command::new("start")
+                .about("Starts processing the queue")
+                .arg(
+                    Arg::new("stop_on_error")
+                        .long("stop-on-error")
+                        .help("stop and exit non-zero after a failed command")
+                        .action(ArgAction::SetTrue),
+                ),
+        )
         .subcommand(
             Command::new("ls")
                 .about("Lists all commands in the queue")
@@ -250,6 +266,7 @@ mod tests {
     // instead of `unwrap` (D6.1).
 
     use super::*;
+    use crate::domain::failure::FailureRecord;
     use crate::ports::command_runner::RunError;
     use crate::ports::editor::EditorError;
     use crate::ports::queue_store::QueueStoreError;
@@ -334,6 +351,11 @@ mod tests {
 
         fn write_all(&self, entries: &[QueueEntry]) -> Result<(), QueueStoreError> {
             *self.entries.lock().map_err(poisoned_store_error)? = entries.to_vec();
+            Ok(())
+        }
+
+        fn append_failure(&self, _record: &FailureRecord) -> Result<(), QueueStoreError> {
+            // P6.F3: the CLI-level tests do not exercise the failure log.
             Ok(())
         }
     }
