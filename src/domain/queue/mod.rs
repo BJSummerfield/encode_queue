@@ -97,6 +97,15 @@ impl QueueEntryIndex {
     }
 }
 
+/// `QueueEntryIndex` displays as its bare 1-based integer — the `1` in
+/// `no queue entry at position 1` — byte-identical to the pre-newtype `u64`
+/// payload (P7.FIX01, D2). Never `0`: construction rejects it.
+impl fmt::Display for QueueEntryIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// The location of the queue file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct QueuePath(PathBuf);
@@ -166,13 +175,15 @@ pub enum QueueEntryError {
     /// zero / out-of-`u32`).
     #[error("invalid entry index '{input}': expected a positive integer")]
     InvalidIndex { input: String },
-    /// A `rm` position was out of range of the queue (0 or beyond its length).
+    /// A `rm` position was out of range of the queue (beyond its length).
     ///
     /// The CLI-facing form of the service's `QueueError::NoEntry` (D2'): the
     /// same message, carried through `CliError::BadCommand` for the exit-2
-    /// arm.
+    /// arm. `requested` is the parsed newtype (P7.FIX01, D2) — it displays
+    /// through `as_u32()`-equivalent integer rendering, keeping the message
+    /// byte-identical (e.g. `no queue entry at position 99`).
     #[error("no queue entry at position {requested}")]
-    IndexOutOfRange { requested: u64 },
+    IndexOutOfRange { requested: QueueEntryIndex },
 }
 
 #[cfg(test)]
@@ -267,6 +278,14 @@ mod tests {
         assert_eq!(QueueEntryIndex::from_str("42").unwrap().as_u32(), 42);
         // Leading zeros are accepted and normalised ("007" -> 7).
         assert_eq!(QueueEntryIndex::from_str("007").unwrap().as_u32(), 7);
+    }
+
+    #[test]
+    fn index_display_is_the_bare_integer() {
+        // P7.FIX01 (D2): the error payloads display the bare integer, so the
+        // `no queue entry at position N` string stays byte-identical.
+        assert_eq!(QueueEntryIndex::from_str("99").unwrap().to_string(), "99");
+        assert_eq!(QueueEntryIndex::from_str("007").unwrap().to_string(), "7");
     }
 
     #[test]

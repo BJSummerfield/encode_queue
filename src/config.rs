@@ -392,12 +392,17 @@ mod tests {
         assert_eq!(cfg.shell(), &Shell::Sh);
     }
 
-    /// An unset or empty `ENCODE_QUEUE_SHELL` defaults to `Shell::Fish`
-    /// (P6.F2, mirroring the `Editor` empty→default convention).
+    /// An unset, empty, or whitespace-only `ENCODE_QUEUE_SHELL` defaults to
+    /// `Shell::Fish` (P6.F2, mirroring the `Editor` empty→default convention;
+    /// the whitespace-only case is P7.FIX01, minor finding 6).
     #[test]
-    fn from_vars_shell_unset_or_empty_defaults_to_fish() {
+    fn from_vars_shell_unset_empty_or_whitespace_defaults_to_fish() {
         let home = std::ffi::OsStr::new("/tmp/fake-home");
-        for shell in [None, Some(std::ffi::OsStr::new(""))] {
+        for shell in [
+            None,
+            Some(std::ffi::OsStr::new("")),
+            Some(std::ffi::OsStr::new("   ")),
+        ] {
             let cfg = must_be_config(Config::from_vars(Some(home), None, None, shell));
             assert_eq!(cfg.shell(), &Shell::Fish);
         }

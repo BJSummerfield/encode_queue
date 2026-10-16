@@ -28,7 +28,7 @@
 //! is NOT implemented here.
 
 use crate::domain::failure::FailureRecord;
-use crate::domain::queue::{QueueEntry, QueueEntryError, QueuePath};
+use crate::domain::queue::{QueueEntry, QueueEntryError, QueueEntryIndex, QueuePath};
 use crate::ports::command_runner::{CommandRunner, RunError};
 use crate::ports::editor::{EditorError, EditorLauncher};
 use crate::ports::queue_lock::{LockError, QueueLock};
@@ -79,7 +79,7 @@ pub enum QueueError {
     /// `remove_entry` was asked for a position with no entry (0 or beyond the
     /// queue's length). The queue is left untouched.
     #[error("no queue entry at position {0}")]
-    NoEntry(u64),
+    NoEntry(QueueEntryIndex),
     /// `--stop-on-error` was set and a command failed.
     #[error("stopped after a failed command (--stop-on-error)")]
     StoppedOnFailure,
@@ -241,12 +241,13 @@ where
     /// the filtered-out entry is the one at 0-based index `pos - 1`. Removing
     /// the only entry rewrites an empty file (`write_all` runs unconditionally
     /// on an empty slice).
-    pub fn remove_entry(&self, pos: u64) -> Result<(), QueueError> {
+    pub fn remove_entry(&self, pos: QueueEntryIndex) -> Result<(), QueueError> {
+        let position = pos.as_u32();
         let entries = self.store.read_all()?;
-        if pos == 0 || pos > entries.len() as u64 {
+        if position == 0 || position > entries.len() as u32 {
             return Err(QueueError::NoEntry(pos));
         }
-        let target = pos as usize - 1;
+        let target = position as usize - 1;
         let filtered: Vec<QueueEntry> = entries
             .iter()
             .enumerate()
@@ -1151,11 +1152,16 @@ mod tests {
         entries.iter().map(|e| e.as_str().to_owned()).collect()
     }
 
+    /// Build a `QueueEntryIndex` from a decimal literal (test-only; TST-03).
+    fn index(s: &str) -> QueueEntryIndex {
+        QueueEntryIndex::from_str(s).expect("valid index literal")
+    }
+
     #[test]
     fn remove_entry_removes_middle_and_keeps_order() {
         let service = make_service(vec![entry("a"), entry("b"), entry("c")]);
 
-        service.remove_entry(2).unwrap();
+        service.remove_entry(index("2")).unwrap();
 
         assert_eq!(
             entry_lines(&service.ls().unwrap()),
@@ -1167,7 +1173,7 @@ mod tests {
     fn remove_entry_removes_first_and_last() {
         // First.
         let service = make_service(vec![entry("a"), entry("b"), entry("c")]);
-        service.remove_entry(1).unwrap();
+        service.remove_entry(index("1")).unwrap();
         assert_eq!(
             entry_lines(&service.ls().unwrap()),
             vec!["b".to_owned(), "c".to_owned()]
@@ -1175,7 +1181,7 @@ mod tests {
 
         // Last.
         let service = make_service(vec![entry("a"), entry("b"), entry("c")]);
-        service.remove_entry(3).unwrap();
+        service.remove_entry(index("3")).unwrap();
         assert_eq!(
             entry_lines(&service.ls().unwrap()),
             vec!["a".to_owned(), "b".to_owned()]
@@ -1186,26 +1192,19 @@ mod tests {
     fn remove_entry_removing_the_only_entry_leaves_an_empty_queue() {
         let service = make_service(vec![entry("a")]);
 
-        service.remove_entry(1).unwrap();
+        service.remove_entry(index("1")).unwrap();
 
         assert!(service.ls().unwrap().is_empty());
     }
 
     #[test]
     fn remove_entry_out_of_range_is_no_entry_and_leaves_the_store_untouched() {
-        // `pos == 0`.
+        // `pos > len`. (The `pos == 0` case is now unconstructible at the
+        // type level: `QueueEntryIndex` rejects 0 at parse time, so only the
+        // `> len` half of the guard is reachable through the public API.)
         let service = make_service(vec![entry("a"), entry("b"), entry("c")]);
-        let err = service.remove_entry(0).unwrap_err();
-        assert!(matches!(err, QueueError::NoEntry(0)));
-        assert_eq!(
-            entry_lines(&service.ls().unwrap()),
-            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
-        );
-
-        // `pos > len`.
-        let service = make_service(vec![entry("a"), entry("b"), entry("c")]);
-        let err = service.remove_entry(4).unwrap_err();
-        assert!(matches!(err, QueueError::NoEntry(4)));
+        let err = service.remove_entry(index("4")).unwrap_err();
+        assert!(matches!(err, QueueError::NoEntry(QueueEntryIndex(i)) if i == 4));
         assert_eq!(
             entry_lines(&service.ls().unwrap()),
             vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
@@ -1215,8 +1214,8 @@ mod tests {
     #[test]
     fn remove_entry_on_empty_queue_is_no_entry() {
         let service = make_service(Vec::new());
-        let err = service.remove_entry(1).unwrap_err();
-        assert!(matches!(err, QueueError::NoEntry(1)));
+        let err = service.remove_entry(index("1")).unwrap_err();
+        assert!(matches!(err, QueueError::NoEntry(QueueEntryIndex(i)) if i == 1));
     }
 
     #[test]
@@ -1243,7 +1242,7 @@ mod tests {
             mock_lock(),
         );
 
-        let err = service.remove_entry(1).unwrap_err();
+        let err = service.remove_entry(index("1")).unwrap_err();
         assert!(matches!(
             err,
             QueueError::Store(QueueStoreError::QueueFileMissing(_))
