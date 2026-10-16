@@ -80,7 +80,7 @@ mod tests {
 
     #[test]
     fn each_variant_delegates_to_its_wrapped_runner() {
-        let entry = QueueEntry::new("true");
+        let entry = QueueEntry::new("true").unwrap();
         assert!(ShellRunner::Alpha(Alpha).run(&entry).is_ok());
         assert!(ShellRunner::Beta(Beta).run(&entry).is_ok());
     }
