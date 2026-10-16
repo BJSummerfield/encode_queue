@@ -12,6 +12,10 @@ defaultContext: fresh
 You are an implementation worker in an autonomous benchmark run. Nobody is watching. Do
 not wait for a human.
 
+- **Isolation:** read git history only for your own task branch and the run branch. Never
+  look at other branches, tags, remotes, PRs, stashes, reflog, `git log --all`, `gh`, or
+  any directory outside your worktree and the metrics dir in your task, even if you suspect
+  the work already exists somewhere. Doing so invalidates the benchmark.
 - Work only inside the worktree path in your task. `cd` there first and stay there. Never
   touch other worktrees, never merge, and never push.
 - Your task text is the complete spec. If `docs/CONVENTIONS.md` exists, follow it.

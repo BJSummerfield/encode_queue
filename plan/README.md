@@ -86,33 +86,69 @@ logged requests, not over the current instance.
 - The research pages are scraped live. P1 records their sha256, so the judge can tell if
   they changed between runs.
 
+## Isolation
+
+Each run happens in a fresh single-branch clone at `~/eq-runs/<run-id>`, which preflight
+creates. The only refs in it are `main` and `bench-base-v1`, so agents can't stumble onto
+`design-file-improvement-orchestrator` (an earlier hexagonal refactor of this repo) or
+another run's `bench/*` branch. Its fetch refspec is limited to `main`. The orchestrator
+rules, the kickoff prompt, and both agent definitions also forbid reading other refs,
+remotes, PRs, or directories. Never start a run from a paseo worktree of
+`~/projects/encode_queue`, because worktrees share every branch of the main repo.
+
 ## Runbook
 
-### Once
+### 1. Reset ninfer (on the GPU host, not in this container)
 
-pi must trust this project, or it won't load `.pi/agents/` and the custom agents will be
-missing. Start pi in the repo once and accept project trust. Then confirm
-`bench-worker` and `bench-reviewer` show up in `subagent({ action: "list" })`.
+ninfer runs in the `local-llm` nixos-container. Its request log is at host path
+`/var/lib/local-llm/ninfer/requests.jsonl`. The ops service keeps the last 50,000
+requests in memory, so you must stop **both** units, rotate the log, and start them again:
 
-### Per run (`<id>` from the table)
+```sh
+RUN=mtp-run1   # the run you are about to do
+sudo nixos-container run local-llm -- systemctl stop ninfer-metrics ninfer
+sudo mv /var/lib/local-llm/ninfer/requests.jsonl /var/lib/local-llm/ninfer/requests.pre-$RUN.jsonl
+# set the run's config: NINFER_EXTRA_ARGS=... in /var/lib/local-llm/ninfer.env (or your usual way)
+sudo nixos-container run local-llm -- systemctl start ninfer ninfer-metrics
+```
 
-1. **Restart ninfer** with the run's config, and **move `/var/lib/ninfer/requests.jsonl`
-   aside** first (restart the ops service too if it caches the log). Wait until the model
-   is loaded and idle.
-2. **Preflight**, from the repo root on a clean `main`:
-   ```sh
-   git switch main && git pull --ff-only
-   plan/scripts/preflight.sh <id>
-   ```
-   It refuses to run if the ops counters weren't reset (`ALLOW_STALE_LOG=1` overrides
-   this). It prints the speculative method and KV dtype it sees, so check that they
-   match the table.
-3. **Start the collector** in its own tmux pane: `plan/scripts/sample_server.sh`.
-4. **Kick off**: start a fresh `pi` session at the repo root and paste the prompt from
-   `KICKOFF.md`. Then leave it alone.
-5. **Postflight**, once the PR is open: stop the collector (Ctrl-C) and run
-   `plan/scripts/finalize.sh` once more, so `report.md` includes the final requests.
-   Then `git switch main` before the next run.
+Wait until `curl -s https://llm.mist-gamma.ts.net:8443/ops/health` shows the engine `ok`.
+
+### 2. Preflight (in this container, from any up-to-date checkout of `main`)
+
+```sh
+plan/scripts/preflight.sh <run-id>
+```
+
+Preflight:
+- refuses to run if the ops counters weren't reset (`ALLOW_STALE_LOG=1` overrides this,
+  and the manifest records that you did);
+- creates the isolated clone `~/eq-runs/<run-id>` and checks it is exactly `bench-base-v1`;
+- creates `~/encode_queue_bench/<run-id>/` and points `current` at it, which is how the
+  identical kickoff prompt knows which run it is;
+- records the server config in `manifest.json` and prints `spec=… kv=…`. **Check that it
+  matches the run table.**
+
+### 3. Start the collector (own tmux pane, leave it running)
+
+```sh
+~/eq-runs/<run-id>/plan/scripts/sample_server.sh
+```
+
+### 4. Kick off
+
+```sh
+cd ~/eq-runs/<run-id> && pi
+```
+
+Accept project trust when pi asks; without it the bench agents don't load. Optionally
+check that `bench-worker` and `bench-reviewer` appear in `subagent({ action: "list" })`.
+Paste the prompt from `KICKOFF.md`, then leave it alone.
+
+### 5. Postflight (after the PR is open)
+
+Stop the collector with Ctrl-C, then run `~/eq-runs/<run-id>/plan/scripts/finalize.sh`
+so `report.md` includes the last requests. Move on to the next run starting at step 1.
 
 ### After all four runs
 

@@ -2,7 +2,8 @@
 
 This prompt is identical for every run; do not edit it per run. The run identity comes
 from `~/encode_queue_bench/current/manifest.json`, which `preflight.sh` writes. Paste
-everything below the line into a fresh pi session started at the repo root on `main`.
+everything below the line into a fresh pi session started in the run's isolated clone
+(`~/eq-runs/<run-id>`, which preflight creates).
 
 ---
 
@@ -18,6 +19,10 @@ describes, and keep going. You dispatch `bench-worker` and `bench-reviewer` sub-
 async launches, keep up to 3 of them in flight at all times (continuous batching), merge
 finished work, and dispatch follow-up or fix tasks whenever problems come up. You keep
 the ledger current throughout the run.
+
+Isolation is a hard rule. Solve everything from the specs and this run's own branches.
+Never look at other git branches, remotes, PRs, or other directories on this machine, even
+if you suspect the work already exists somewhere, and make every child obey the same rule.
 
 You are done when every item of the P8 checklist in `plan/TASKS.md` is ticked and the PR
 for your run branch is open against `main`. Do not merge it.

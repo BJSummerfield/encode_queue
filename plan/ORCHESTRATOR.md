@@ -12,7 +12,7 @@ next, and keep the ledger. You never write product code or docs yourself.
 | `RUN_ID` | `jq -r .run_id $BENCH_DIR/manifest.json` |
 | `RUN_BRANCH` | `bench/<RUN_ID>` |
 | `BASE` | tag `bench-base-v1` |
-| `REPO` | the checkout this session started in (`git rev-parse --show-toplevel`) |
+| `REPO` | the isolated clone this session started in (`jq -r .repo $BENCH_DIR/manifest.json`) |
 | `WT_ROOT` | `~/eq-wt/<RUN_ID>/` |
 | `MAX_IN_FLIGHT` | **3** sub-agents at once (3 children plus you = ninfer's 4 sequences) |
 | `MAX_REVIEW_ROUNDS` | **3** per task |
@@ -27,6 +27,28 @@ next, and keep the ledger. You never write product code or docs yourself.
 - When something is ambiguous, decide and append one line to `$BENCH_DIR/decisions.md`:
   `<ISO time> <task-id> <decision> — <reason>`. Then `$L note <task-id> msg="decision"`.
 - Never edit anything under `plan/` or `.pi/`.
+
+## Isolation (hard rule; breaking it invalidates the run)
+
+This run must solve every task from scratch, so the run never sees prior work by
+anyone else. You and every child you launch must obey all of these:
+
+- Git history may be read only for `RUN_BRANCH` and the run's own `task/<RUN_ID>/*`
+  branches. Never use `--all`, `--branches`, `--remotes`, `git branch -a`, `git ls-remote`,
+  `git reflog`, `git stash list`, or `git fetch`. Never check out, diff, show, or log any
+  other ref.
+- Never use `gh` or the GitHub website to read other branches, PRs, issues, or forks. The
+  only `gh` call allowed in the whole run is the final `gh pr create` in P8.
+- Read nothing outside `REPO`, `WT_ROOT`, and this run's `BENCH_DIR`. In particular, do
+  not read other directories under `~/encode_queue_bench/`, `~/eq-runs/`, `~/eq-wt/`,
+  `~/projects/`, or `~/.pi/` (past sessions).
+- The only web access allowed is the four P1 `curl` URLs.
+- Put the following paragraph verbatim at the top of every child prompt.
+
+> ISOLATION: Work only inside your worktree. Read git history only for your own branch
+> and `RUN_BRANCH`. Never look at other branches, tags, remotes, PRs, stashes, reflog, or
+> other directories on this machine, even if you suspect the work already exists
+> somewhere. Solve the task from the spec and the files in your worktree.
 
 ## Continuous batching (the dispatch loop)
 
@@ -71,6 +93,7 @@ work. Do not wait for a whole fan-out to finish before starting the next ready i
 **Worker**:
 ```
 TASK <T> (round <k>) — benchmark run <RUN_ID>
+<ISOLATION paragraph>
 Worktree: <WT_ROOT>/<T>   Branch: task/<RUN_ID>/<T>   Metrics dir: <BENCH_DIR expanded>
 Conventions: docs/CONVENTIONS.md (if present)
 Commit as "<T>: <summary>".
@@ -86,6 +109,7 @@ REVIEW FINDINGS TO FIX (from review/<T>-r<k-1>.md)
 **Reviewer**:
 ```
 REVIEW <T> round <k> — benchmark run <RUN_ID>
+<ISOLATION paragraph>
 Worktree: <WT_ROOT>/<T>   Diff: git diff <dispatch-base>..HEAD
 Write your verdict to: review/<T>-r<k>.md
 
