@@ -1,24 +1,37 @@
 //! Application/service layer for the queue.
 //!
-//! Scaffold (WP01): `QueueService` is a shell that holds the three injected
-//! ports; its `add`/`ls`/`start`/`edit` methods (and the `QueueError` that
-//! composes the boundary errors via `#[from]`) are implemented in WP08. It
-//! already establishes the intended dependency direction: the service depends
-//! only on `crate::domain` and `crate::ports` (ARCH-01).
+//! WP08: `QueueService` is generic over its three injected ports
+//! (`R: QueueStore`, `C: CommandRunner`, `E: EditorLauncher`) and exposes
+//! `add`/`ls`/`start`/`edit`. Every method takes and returns only domain
+//! newtypes and the [`QueueError`] enum (ARCH-04): no `&str`/`String`
+//! parameters, and the module imports only `crate::domain` and `crate::ports`
+//! (ARCH-01).
+//! `QueueError` composes the four boundary enums via `#[from]` and never
+//! duplicates their variants (ERR-02).
 //!
-//! The fields and `new` are unused until WP08 wires the operations; the
-//! resulting `dead_code` warnings are expected scaffold-stage noise (the
-//! `-D warnings` gate is a WP10 property).
+//! A third port generic (`E: EditorLauncher`) beyond the `QueueService<R, C>`
+//! shorthand is intentional: it lets all three ports be injected with mocks
+//! (TST-01), which the two-generic form cannot express.
+//!
+//! `start` preserves the legacy `process_queue` behaviour byte-for-byte:
+//! trim-before-run, unconditional removal of the first line (blank lines are
+//! removed, not run), a fresh re-read + rewrite each iteration, immediate
+//! error propagation before the rewrite, and a discarded child exit status.
+//! The strict trim + `Empty`-reject (V-TY-02) and exit-status surfacing
+//! (V-ERR-09) are deferred P6 changes and are NOT implemented here.
 
-use crate::ports::command_runner::CommandRunner;
-use crate::ports::editor::EditorLauncher;
-use crate::ports::queue_store::QueueStore;
+use crate::domain::queue::{QueueEntry, QueueEntryError, QueuePath};
+use crate::ports::command_runner::{CommandRunner, RunError};
+use crate::ports::editor::{EditorError, EditorLauncher};
+use crate::ports::queue_store::{QueueStore, QueueStoreError};
 
 /// The queue service, generic over its three injected ports.
 ///
 /// A third port generic (`E: EditorLauncher`) beyond the `QueueService<R, C>`
 /// shorthand is required so that all three ports can be injected with mocks
-/// (TST-01).
+/// (TST-01). The queue `QueuePath` is deliberately NOT a field here: `Config`
+/// remains the single origin of that path (V-ARCH-05), so the service depends
+/// only on the ports (ARCH-01).
 #[derive(Debug, Clone)]
 pub struct QueueService<R, C, E>
 where
@@ -29,6 +42,28 @@ where
     store: R,
     runner: C,
     editor: E,
+}
+
+/// Errors surfaced by the queue service.
+///
+/// Composes the four boundary enums via `#[from]` and never duplicates their
+/// variants (ERR-02): `Store` for queue-file I/O, `Run` for command execution,
+/// `Editor` for editor launch, and `Invalid` for a line rejected by the
+/// domain's `QueueEntry` constructor.
+#[derive(Debug, thiserror::Error)]
+pub enum QueueError {
+    /// The queue store (file I/O boundary) failed.
+    #[error(transparent)]
+    Store(#[from] QueueStoreError),
+    /// Running a queued command failed at the runner boundary.
+    #[error(transparent)]
+    Run(#[from] RunError),
+    /// Launching the editor failed at the editor boundary.
+    #[error(transparent)]
+    Editor(#[from] EditorError),
+    /// A queued line was rejected by the domain `QueueEntry` constructor.
+    #[error("command rejected by the domain: {0}")]
+    Invalid(#[from] QueueEntryError),
 }
 
 impl<R, C, E> QueueService<R, C, E>
@@ -44,5 +79,478 @@ where
             runner,
             editor,
         }
+    }
+
+    /// Append a single entry to the queue.
+    pub fn add(&self, entry: &QueueEntry) -> Result<(), QueueError> {
+        self.store.append(entry)?;
+        Ok(())
+    }
+
+    /// List every entry in the queue, in order (blank lines verbatim).
+    pub fn ls(&self) -> Result<Vec<QueueEntry>, QueueError> {
+        Ok(self.store.read_all()?)
+    }
+
+    /// Run the queued entries, one per iteration, until the queue is empty.
+    ///
+    /// Each iteration reads the whole queue (a missing file surfaces as
+    /// `QueueError::Store`), breaks on an empty queue without rewriting, trims
+    /// the first line and runs it only when non-blank (a blank first line is
+    /// not run but is still removed — the removal is unconditional), then drops
+    /// the first entry by re-reading and rewriting the remainder. A store or
+    /// runner error propagates immediately, before the rewrite, leaving the
+    /// queue unmodified up to that point. The child's exit status is discarded
+    /// (WP05-preserved; V-ERR-09 is deferred to P6).
+    pub fn start(&self) -> Result<(), QueueError> {
+        loop {
+            // Fresh read each iteration: the queue "may have been edited"
+            // between iterations.
+            let entries = self.store.read_all()?;
+
+            // Legacy `read_line() == 0` → break; no rewrite on an empty queue.
+            if entries.is_empty() {
+                break;
+            }
+
+            let first = &entries[0];
+            if !first.as_str().trim().is_empty() {
+                // Trim before running. `QueueEntry::new` is lenient on the P5
+                // path (never fails); its fallible `Err` arm maps through
+                // `#[from]` to `QueueError::Invalid` (GEN-01: no `unwrap`).
+                let trimmed = QueueEntry::new(first.as_str().trim())?;
+                // The child's exit status is discarded here (WP05-preserved).
+                self.runner.run(&trimmed)?;
+            }
+            // Unconditional removal: even a blank first line is dropped.
+            // `drop_first` re-reads and rewrites the remainder (empty → no
+            // rewrite, WP04-pinned).
+            self.store.drop_first()?;
+        }
+        Ok(())
+    }
+
+    /// Open the queue located at `at` in the configured editor.
+    ///
+    /// The path is supplied by the caller (`Config` is the single origin of the
+    /// queue `QueuePath`, V-ARCH-05); the service depends only on the editor
+    /// port (ARCH-01).
+    pub fn edit(&self, at: &QueuePath) -> Result<(), QueueError> {
+        self.editor.open(at)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    /// In-memory `QueueStore` mock: `entries` is the backing queue; `read_err`
+    /// and `drop_err` are one-shot scripted failures (returned on the next
+    /// matching call). Purely in-memory: no real file, no environment access.
+    struct MockStore {
+        entries: Mutex<Vec<QueueEntry>>,
+        read_err: Mutex<Option<QueueStoreError>>,
+        drop_err: Mutex<Option<QueueStoreError>>,
+    }
+
+    impl QueueStore for MockStore {
+        fn read_all(&self) -> Result<Vec<QueueEntry>, QueueStoreError> {
+            if let Some(err) = self.read_err.lock().unwrap().take() {
+                return Err(err);
+            }
+            Ok(self.entries.lock().unwrap().clone())
+        }
+
+        fn append(&self, entry: &QueueEntry) -> Result<(), QueueStoreError> {
+            self.entries.lock().unwrap().push(entry.clone());
+            Ok(())
+        }
+
+        fn drop_first(&self) -> Result<(), QueueStoreError> {
+            if let Some(err) = self.drop_err.lock().unwrap().take() {
+                return Err(err);
+            }
+            let mut entries = self.entries.lock().unwrap();
+            if !entries.is_empty() {
+                entries.remove(0);
+            }
+            Ok(())
+        }
+    }
+
+    /// `CommandRunner` mock: records each `as_str()` it was asked to run and
+    /// returns the one-shot scripted `fail` error (consumed on the first call).
+    struct MockRunner {
+        ran: Mutex<Vec<String>>,
+        fail: Mutex<Option<RunError>>,
+    }
+
+    impl CommandRunner for MockRunner {
+        fn run(&self, entry: &QueueEntry) -> Result<(), RunError> {
+            self.ran.lock().unwrap().push(entry.as_str().to_owned());
+            self.fail.lock().unwrap().take().map_or(Ok(()), Err)
+        }
+    }
+
+    /// `EditorLauncher` mock: records each `QueuePath` `open` was called with
+    /// and returns the one-shot scripted `fail` error (consumed on the first
+    /// call). No real editor is spawned.
+    struct MockEditor {
+        opened: Mutex<Vec<PathBuf>>,
+        fail: Mutex<Option<EditorError>>,
+    }
+
+    impl EditorLauncher for MockEditor {
+        fn open(&self, at: &QueuePath) -> Result<(), EditorError> {
+            self.opened.lock().unwrap().push(at.as_path().to_path_buf());
+            self.fail.lock().unwrap().take().map_or(Ok(()), Err)
+        }
+    }
+
+    fn entry(line: &str) -> QueueEntry {
+        QueueEntry::new(line).unwrap()
+    }
+
+    #[test]
+    fn add_appends_entry_to_store() {
+        let store = MockStore {
+            entries: Mutex::new(Vec::new()),
+            read_err: Mutex::new(None),
+            drop_err: Mutex::new(None),
+        };
+        let service = QueueService::new(
+            store,
+            MockRunner {
+                ran: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+            MockEditor {
+                opened: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+        );
+
+        service.add(&entry("nix build .")).unwrap();
+
+        let entries = service.ls().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].as_str(), "nix build .");
+    }
+
+    #[test]
+    fn ls_returns_entries_in_order_including_blank_line() {
+        let store = MockStore {
+            entries: Mutex::new(vec![entry("a"), entry("   "), entry("c")]),
+            read_err: Mutex::new(None),
+            drop_err: Mutex::new(None),
+        };
+        let service = QueueService::new(
+            store,
+            MockRunner {
+                ran: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+            MockEditor {
+                opened: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+        );
+
+        let lines: Vec<String> = service
+            .ls()
+            .unwrap()
+            .iter()
+            .map(|e| e.as_str().to_owned())
+            .collect();
+        assert_eq!(
+            lines,
+            vec!["a".to_owned(), "   ".to_owned(), "c".to_owned()]
+        );
+    }
+
+    #[test]
+    fn start_removes_entry_after_successful_run() {
+        let store = MockStore {
+            entries: Mutex::new(vec![entry("cmd")]),
+            read_err: Mutex::new(None),
+            drop_err: Mutex::new(None),
+        };
+        let runner = MockRunner {
+            ran: Mutex::new(Vec::new()),
+            fail: Mutex::new(None),
+        };
+        let service = QueueService::new(
+            store,
+            runner,
+            MockEditor {
+                opened: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+        );
+
+        service.start().unwrap();
+
+        assert_eq!(service.ls().unwrap(), Vec::<QueueEntry>::new());
+        assert_eq!(*service.runner.ran.lock().unwrap(), vec!["cmd".to_owned()]);
+    }
+
+    #[test]
+    fn start_runs_each_entry_until_queue_empty() {
+        let store = MockStore {
+            entries: Mutex::new(vec![entry("first"), entry("second")]),
+            read_err: Mutex::new(None),
+            drop_err: Mutex::new(None),
+        };
+        let runner = MockRunner {
+            ran: Mutex::new(Vec::new()),
+            fail: Mutex::new(None),
+        };
+        let service = QueueService::new(
+            store,
+            runner,
+            MockEditor {
+                opened: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+        );
+
+        service.start().unwrap();
+
+        assert_eq!(
+            *service.runner.ran.lock().unwrap(),
+            vec!["first".to_owned(), "second".to_owned()]
+        );
+        assert!(service.ls().unwrap().is_empty());
+    }
+
+    #[test]
+    fn start_trims_entry_before_running() {
+        let store = MockStore {
+            entries: Mutex::new(vec![entry("  cmd  ")]),
+            read_err: Mutex::new(None),
+            drop_err: Mutex::new(None),
+        };
+        let runner = MockRunner {
+            ran: Mutex::new(Vec::new()),
+            fail: Mutex::new(None),
+        };
+        let service = QueueService::new(
+            store,
+            runner,
+            MockEditor {
+                opened: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+        );
+
+        service.start().unwrap();
+
+        assert_eq!(*service.runner.ran.lock().unwrap(), vec!["cmd".to_owned()]);
+        assert!(service.ls().unwrap().is_empty());
+    }
+
+    #[test]
+    fn start_skips_blank_first_line_but_still_removes_it() {
+        let store = MockStore {
+            entries: Mutex::new(vec![entry("   "), entry("cmd")]),
+            read_err: Mutex::new(None),
+            drop_err: Mutex::new(None),
+        };
+        let runner = MockRunner {
+            ran: Mutex::new(Vec::new()),
+            fail: Mutex::new(None),
+        };
+        let service = QueueService::new(
+            store,
+            runner,
+            MockEditor {
+                opened: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+        );
+
+        service.start().unwrap();
+
+        // Exactly one run: the blank first line is removed without being run,
+        // then "cmd" runs.
+        assert_eq!(*service.runner.ran.lock().unwrap(), vec!["cmd".to_owned()]);
+        assert!(service.ls().unwrap().is_empty());
+    }
+
+    #[test]
+    fn start_propagates_runner_error_and_keeps_entry() {
+        let store = MockStore {
+            entries: Mutex::new(vec![entry("cmd"), entry("second")]),
+            read_err: Mutex::new(None),
+            drop_err: Mutex::new(None),
+        };
+        let runner = MockRunner {
+            ran: Mutex::new(Vec::new()),
+            fail: Mutex::new(Some(RunError::Other(std::io::Error::other("spawn failed")))),
+        };
+        let service = QueueService::new(
+            store,
+            runner,
+            MockEditor {
+                opened: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+        );
+
+        let err = service.start().unwrap_err();
+        assert!(matches!(err, QueueError::Run(RunError::Other(_))));
+
+        // Error is before the rewrite: the store STILL contains the entry.
+        let lines: Vec<String> = service
+            .ls()
+            .unwrap()
+            .iter()
+            .map(|e| e.as_str().to_owned())
+            .collect();
+        assert_eq!(lines, vec!["cmd".to_owned(), "second".to_owned()]);
+    }
+
+    #[test]
+    fn start_propagates_store_error_without_running() {
+        let store = MockStore {
+            entries: Mutex::new(vec![entry("cmd")]),
+            read_err: Mutex::new(Some(QueueStoreError::QueueFileMissing(PathBuf::from(
+                "/tmp/mock-home/queue/commands.txt",
+            )))),
+            drop_err: Mutex::new(None),
+        };
+        let runner = MockRunner {
+            ran: Mutex::new(Vec::new()),
+            fail: Mutex::new(None),
+        };
+        let service = QueueService::new(
+            store,
+            runner,
+            MockEditor {
+                opened: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+        );
+
+        let err = service.start().unwrap_err();
+        assert!(matches!(
+            err,
+            QueueError::Store(QueueStoreError::QueueFileMissing(_))
+        ));
+
+        // The read failed before any run: no run call was made.
+        assert!(service.runner.ran.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn edit_opens_editor_at_given_path() {
+        let store = MockStore {
+            entries: Mutex::new(Vec::new()),
+            read_err: Mutex::new(None),
+            drop_err: Mutex::new(None),
+        };
+        let editor = MockEditor {
+            opened: Mutex::new(Vec::new()),
+            fail: Mutex::new(None),
+        };
+        let service = QueueService::new(
+            store,
+            MockRunner {
+                ran: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+            editor,
+        );
+
+        let at = QueuePath::new(PathBuf::from("/tmp/mock-home/queue/commands.txt"));
+        service.edit(&at).unwrap();
+
+        let opened = service.editor.opened.lock().unwrap();
+        assert_eq!(opened.len(), 1);
+        assert_eq!(
+            opened[0],
+            PathBuf::from("/tmp/mock-home/queue/commands.txt")
+        );
+    }
+
+    #[test]
+    fn edit_propagates_editor_error() {
+        let store = MockStore {
+            entries: Mutex::new(Vec::new()),
+            read_err: Mutex::new(None),
+            drop_err: Mutex::new(None),
+        };
+        let editor = MockEditor {
+            opened: Mutex::new(Vec::new()),
+            fail: Mutex::new(Some(EditorError::Spawn(std::io::Error::other("no editor")))),
+        };
+        let service = QueueService::new(
+            store,
+            MockRunner {
+                ran: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+            editor,
+        );
+
+        let at = QueuePath::new(PathBuf::from("/tmp/mock-home/queue/commands.txt"));
+        let err = service.edit(&at).unwrap_err();
+        assert!(matches!(err, QueueError::Editor(EditorError::Spawn(_))));
+    }
+
+    #[test]
+    fn ls_propagates_store_error() {
+        let store = MockStore {
+            entries: Mutex::new(Vec::new()),
+            read_err: Mutex::new(Some(QueueStoreError::QueueFileMissing(PathBuf::from(
+                "/tmp/mock-home/queue/commands.txt",
+            )))),
+            drop_err: Mutex::new(None),
+        };
+        let service = QueueService::new(
+            store,
+            MockRunner {
+                ran: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+            MockEditor {
+                opened: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+        );
+
+        let err = service.ls().unwrap_err();
+        assert!(matches!(
+            err,
+            QueueError::Store(QueueStoreError::QueueFileMissing(_))
+        ));
+    }
+
+    #[test]
+    fn queue_error_composes_each_boundary_error_via_from() {
+        // Store boundary.
+        let store: QueueError = QueueStoreError::QueueFileMissing(PathBuf::from("q")).into();
+        assert!(matches!(
+            store,
+            QueueError::Store(QueueStoreError::QueueFileMissing(_))
+        ));
+
+        // Runner boundary.
+        let run: QueueError = RunError::Other(std::io::Error::other("boom")).into();
+        assert!(matches!(run, QueueError::Run(RunError::Other(_))));
+
+        // Editor boundary.
+        let editor: QueueError = EditorError::Spawn(std::io::Error::other("no editor")).into();
+        assert!(matches!(editor, QueueError::Editor(EditorError::Spawn(_))));
+
+        // Domain boundary (the deferred strict `Empty` reject).
+        let invalid: QueueError = QueueEntryError::Empty.into();
+        assert!(matches!(
+            invalid,
+            QueueError::Invalid(QueueEntryError::Empty)
+        ));
     }
 }
