@@ -79,7 +79,7 @@ use std::{env, fs, process::Command as SystemCommand};
 // SystemCommand::new("fish") all sit next to each other.
 ```
 
-**How to check.** `grep -rnE "clap|std::process|std::fs" src/domain src/ports 2>/dev/null` → empty (`2>/dev/null` keeps it runnable before `src/domain`/`src/ports` exist; today it is simply empty).
+**How to check.** `grep -rnE "clap|std::process|std::fs" src/ | grep -E "^src/(domain|ports)/"` → empty. Anchoring the search to `src/` (which always exists) keeps the command clean before `src/domain`/`src/ports` exist — an empty result is a normal "no matches" exit 1, not the exit 2 a bare `grep … src/domain` gives on a missing directory.
 
 **Source.** OP1; hex-R2:S16, hex-R17:S29.
 
@@ -140,7 +140,7 @@ pub fn run(&self, entry: &QueueEntry) -> Result<(), RunError> {
 `io::Result<()>`, so callers see OS-level detail instead of queue-level
 failures.
 
-**How to check.** `grep -rnE "clap|std::process|OpenOptions" src/ports src/domain 2>/dev/null` → empty (`2>/dev/null` keeps it runnable before `src/ports`/`src/domain` exist).
+**How to check.** `grep -rnE "clap|std::process|OpenOptions" src/ | grep -E "^src/(domain|ports)/"` → empty (anchored to `src/`, so a clean result is a normal "no matches" exit 1 even before `src/ports`/`src/domain` exist).
 
 **Source.** OP1; hex-R9:S8.
 
@@ -233,9 +233,14 @@ pub enum QueueError {
 "queue file missing", "permission denied" and "`fish` failed to spawn" are
 indistinguishable to the caller.
 
-**How to check.** Manual: exactly one error enum per file in `src/ports/` and
-`src/outbound/`; `QueueError`'s variants number no more than the boundaries it
-composes.
+**How to check.** Manual: at most one error enum per file, each boundary's enum
+beside its port — `src/ports/queue_store.rs` → `QueueStoreError`,
+`src/ports/command_runner.rs` → `RunError`, `src/ports/editor.rs` →
+`EditorError` — plus the domain's `QueueEntryError` in
+`src/domain/queue/mod.rs`; the `src/outbound/` adapters define *no* error enum
+of their own (they translate into the port enums); `QueueError` composes the
+boundary enums via `#[from]` (never duplicates them) and numbers no more
+variants than the boundaries it composes.
 
 **Source.** OP3; err-7:S15, err-8:S19.
 
@@ -390,7 +395,7 @@ pub trait EditorLauncher {
 `SystemCommand::new(editor).arg(file_path)` — every knob is a bare string, and
 nothing stops `start` from being handed the editor name.
 
-**How to check.** `grep -rnE "fn [a-z_0-9]+ *\([^)]*: *(&str|String|&Path|PathBuf)\b" src/domain src/ports 2>/dev/null` → empty. This matches raw types in *named* parameters too (e.g. `fn append(&self, entry: &str)`), which an unnamed-only pattern misses; because it is line-based it only catches single-line signatures, so treat it as a spot check alongside a manual scan of port signatures. `2>/dev/null` keeps it runnable before `src/domain`/`src/ports` exist.
+**How to check.** `grep -rnE "fn [a-z_0-9]+ *\([^)]*: *(&str|String|&Path|PathBuf)\b" src/ | grep -E "^src/(domain|ports)/" | grep -vE "fn (from_str|try_from|from_utf8)\b"` → empty. Stage 2 scopes the check to the queue domain (raw `&str` in `inbound/cli.rs` is *expected* — that is where it is translated); stage 3 exempts the parsing-boundary impls that TY-01/TY-04 mandate — `from_str`/`try_from`/`from_utf8` are the one legal place raw text enters the domain — so compliant newtype + `FromStr`/`TryFrom`/`FromUtf8` code passes while any other raw-typed parameter (e.g. `fn append(&self, entry: &str)`, `fn new(s: &str)` on a port, `fn open(&self, at: &Path)`) is flagged. Anchoring stage 1 to `src/` keeps the command a normal "no matches" exit 1 even before `src/domain`/`src/ports` exist. It is line-based, so it catches single-line signatures only — treat it as a spot check alongside a manual scan of port signatures.
 
 **Source.** OP4; new-R1:S5/S2.
 
@@ -423,7 +428,7 @@ pub struct QueueEntry(pub String);
 // and the invariant is gone.
 ```
 
-**How to check.** `grep -rnE "^\s*pub [a-z_][a-z0-9_]*\s*:" src/domain 2>/dev/null` → empty (no `pub` fields; `2>/dev/null` keeps it runnable before `src/domain` exists).
+**How to check.** `grep -rnE "^\s*pub [a-z_][a-z0-9_]*\s*:" src/ | grep -E "^src/domain/"` → empty (no `pub` fields in the domain; anchored to `src/`, so a clean result is a normal "no matches" exit 1 even before `src/domain` exists).
 
 **Source.** OP5; new-R3:S8, new A2:S6/S7.
 
@@ -480,9 +485,10 @@ impl Deref for QueueEntry { type Target = str; /* … */ }
 ```
 
 **How to check.** `grep -rn "impl Deref\|impl Borrow" src` → empty; the
-`inherent_to_string_shadow_display` deny enabled at the crate root (GEN-04) stays
-clean under `cargo clippy` (it is a restriction lint, so the check is only
-meaningful once that `#![deny]` is present).
+`inherent_to_string_shadow_display` stays clean under `cargo clippy`: it is
+deny **by default** in clippy's correctness group, so the check is meaningful
+with or without the explicit `#![deny]` at the crate root (GEN-04) — that deny
+line is belt-and-braces, kept for self-documentation.
 
 **Source.** new A4:S19/S20, new A5:S24/S25, new A6:S17.
 
@@ -702,9 +708,9 @@ the current code, which is untestable: `main` computes the `$HOME`-based queue
 path and passes it to `process_queue`, which spawns `fish` on it).
 
 **How to check.** (Applies once the Target layout exists.)
-`grep -rn "#\[cfg(test)\]" src/domain/queue` is non-empty, and no test contains
-`.config/encode_queue` or spawns `fish`
-(`grep -rnE "\.config/encode_queue|fish" src/domain 2>/dev/null` → empty).
+`grep -rn "#\[cfg(test)\]" src/ | grep -E "^src/domain/"` is non-empty (mock
+tests live in the domain), and no domain test touches the real queue path or
+spawns `fish`: `grep -rnE "\.config/encode_queue|fish" src/ | grep -E "^src/domain/"` → empty.
 
 **Source.** OP1; hex-R12:S21/S22.
 
@@ -749,8 +755,8 @@ rely on it (hex-R12:S22 uses `.unwrap()` throughout its handler tests).
 **Bad.** The same call in `inbound/cli.rs` (violates GEN-01).
 
 **How to check.** The test-aware lint in GEN-01 —
-`#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]`
-denies these calls only in non-test builds, so
+`#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unreachable))]`
+denies `unwrap`/`expect`/`panic!`/`unreachable!` only in non-test builds, so
 `cargo clippy --all-targets --all-features -- -D warnings` fails on a non-test
 `unwrap`/`expect` yet passes a `#[cfg(test)]` fixture that uses them. A plain
 line-based `grep … | grep -v "cfg(test)"` does *not* work here: the `#[cfg(test)]`
@@ -780,17 +786,20 @@ let Some(cmd) = matches.get_one::<String>("COMMAND") else {
 };
 ```
 
-**Bad.** (current `src/main.rs`, four violations in one file)
+**Bad.** (current `src/main.rs`, five violations in one file)
 `env::var("HOME").expect(…)`, `get_one::<String>(…).unwrap()`,
-`_ => unreachable!()` after the subcommand match, and
-`status().expect("Failed to open editor")`.
+`queue_path.to_str().unwrap()` in the `edit` arm, `_ => unreachable!()` after
+the subcommand match, and `status().expect("Failed to open editor")`.
 
-**How to check.** Crate root: `#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]`
-so `cargo clippy --all-targets --all-features -- -D warnings` denies `unwrap`/`expect`
-in non-test code while allowing them in `#[cfg(test)]` fixtures — the attribute is
-test-aware, which the broken line-based `grep … | grep -v "cfg(test)"` is not
-(the attribute sits on the `mod tests {` line, so a plain grep false-positives on
-compliant test code and is not used).
+**How to check.** Crate root: `#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unreachable))]`
+so `cargo clippy --all-targets --all-features -- -D warnings` denies all four —
+`unwrap`, `expect`, `panic!`, `unreachable!` — in non-test code while allowing
+them in `#[cfg(test)]` fixtures (`clippy::panic` and `clippy::unreachable` are
+allow-by-default restriction lints, so without the `deny` the check would
+correctly ignore both macros). The attribute is test-aware, which the broken
+line-based `grep … | grep -v "cfg(test)"` is not (the attribute sits on the
+`mod tests {` line, so a plain grep false-positives on compliant test code and
+is not used).
 
 **Source.** OP6; hex-R15:S9.
 
@@ -841,7 +850,12 @@ on a different thread"; a borrowed field makes the error
 **Bad.** `QueueFileMissing(&'a Path)` — the error only compiles when the path
 happens to outlive the call site.
 
-**How to check.** Manual: `grep -rnE "impl(Debug|Display|Error)" -A 15 src/ports` shows no `&` payloads in variant fields.
+**How to check.** Manual: `grep -rnE "^pub enum" src/ | grep -E "^src/(ports|domain)/"`
+lists every error enum (the set ERR-02 prescribes); review each listed enum's
+variant payload fields and confirm none is a borrowed `&`/lifetime reference.
+(The aid targets the `pub enum` declarations because ERR-01 mandates
+`thiserror`-derived enums, which contain no hand-written `impl Display`/`impl
+Error` line to grep for.)
 
 **Source.** err-1:S2/S3.
 
@@ -857,8 +871,8 @@ comments hide exactly the violations the other conventions forbid.
 
 **Good.** At the crate root:
 ```rust
-#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
-#![deny(clippy::inherent_to_string_shadow_display)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unreachable))]
+#![deny(clippy::inherent_to_string_shadow_display)]  // belt-and-braces: deny by default already
 ```
 no `#[allow]` in `src/`.
 
@@ -866,9 +880,10 @@ no `#[allow]` in `src/`.
 the current `.expect(…)` compiling.
 
 **How to check.** `cargo clippy --all-targets --all-features -- -D warnings` exits clean
-with both lint lines above present at the crate root (so `unwrap_used`/
-`expect_used` and `inherent_to_string_shadow_display` are actually enforced, not just
-present in the docs); `grep -rn "#\[allow" src` → empty.
+with both lint lines above present at the crate root (so the four OP6 lints and
+`inherent_to_string_shadow_display` are actually enforced, not just present in the
+docs; `inherent_to_string_shadow_display` is deny by default anyway, so its
+explicit `#![deny]` is belt-and-braces); `grep -rn "#\[allow" src` → empty.
 
 **Source.** repo toolchain; supports OP6 and TY-05.
 
@@ -898,7 +913,7 @@ preference (or with another article where the outcome affects this repo):
 
 3. **`unwrap` in production code.** The guide's canonical `Service`
    implementation calls `result.as_ref().unwrap()` (hex-R16:S27), and the
-   current `src/main.rs` uses `expect`/`unwrap`/`unreachable!` four times.
+   current `src/main.rs` uses `expect`/`unwrap`/`unreachable!` five times.
    **OP6 wins:** the service propagates the error (e.g. via
    `match`/`as_ref().ok_or_else`) instead of panicking; `main` returns an
    `ExitCode` (GEN-01).
