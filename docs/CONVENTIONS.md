@@ -79,7 +79,7 @@ use std::{env, fs, process::Command as SystemCommand};
 // SystemCommand::new("fish") all sit next to each other.
 ```
 
-**How to check.** `grep -rnE "clap|std::process|std::fs" src/domain src/ports` → empty.
+**How to check.** `grep -rnE "clap|std::process|std::fs" src/domain src/ports 2>/dev/null` → empty (`2>/dev/null` keeps it runnable before `src/domain`/`src/ports` exist; today it is simply empty).
 
 **Source.** OP1; hex-R2:S16, hex-R17:S29.
 
@@ -140,7 +140,7 @@ pub fn run(&self, entry: &QueueEntry) -> Result<(), RunError> {
 `io::Result<()>`, so callers see OS-level detail instead of queue-level
 failures.
 
-**How to check.** `grep -rnE "clap|std::process|OpenOptions" src/ports src/domain` → empty.
+**How to check.** `grep -rnE "clap|std::process|OpenOptions" src/ports src/domain 2>/dev/null` → empty (`2>/dev/null` keeps it runnable before `src/ports`/`src/domain` exist).
 
 **Source.** OP1; hex-R9:S8.
 
@@ -390,7 +390,7 @@ pub trait EditorLauncher {
 `SystemCommand::new(editor).arg(file_path)` — every knob is a bare string, and
 nothing stops `start` from being handed the editor name.
 
-**How to check.** `grep -rnE "fn [a-z_0-9]+\((self, )*(&str|String|&Path|PathBuf)" src/domain src/ports` → empty.
+**How to check.** `grep -rnE "fn [a-z_0-9]+ *\([^)]*: *(&str|String|&Path|PathBuf)\b" src/domain src/ports 2>/dev/null` → empty. This matches raw types in *named* parameters too (e.g. `fn append(&self, entry: &str)`), which an unnamed-only pattern misses; because it is line-based it only catches single-line signatures, so treat it as a spot check alongside a manual scan of port signatures. `2>/dev/null` keeps it runnable before `src/domain`/`src/ports` exist.
 
 **Source.** OP4; new-R1:S5/S2.
 
@@ -423,7 +423,7 @@ pub struct QueueEntry(pub String);
 // and the invariant is gone.
 ```
 
-**How to check.** `grep -rnE "^\s*pub [a-z_][a-z0-9_]*\s*:" src/domain` → empty (no `pub` fields).
+**How to check.** `grep -rnE "^\s*pub [a-z_][a-z0-9_]*\s*:" src/domain 2>/dev/null` → empty (no `pub` fields; `2>/dev/null` keeps it runnable before `src/domain` exists).
 
 **Source.** OP5; new-R3:S8, new A2:S6/S7.
 
@@ -479,8 +479,10 @@ impl Deref for QueueEntry { type Target = str; /* … */ }
 // flags it (inherent_to_string_shadow_display, new A6:S17).
 ```
 
-**How to check.** `grep -rn "impl Deref\|impl Borrow" src` → empty; clippy lint
-`inherent_to_string_shadow_display` stays clean.
+**How to check.** `grep -rn "impl Deref\|impl Borrow" src` → empty; the
+`inherent_to_string_shadow_display` deny enabled at the crate root (GEN-04) stays
+clean under `cargo clippy` (it is a restriction lint, so the check is only
+meaningful once that `#![deny]` is present).
 
 **Source.** new A4:S19/S20, new A5:S24/S25, new A6:S17.
 
@@ -678,7 +680,7 @@ directories; runner/editor adapter tests use fake processes (e.g.
 
 **Why.** Because handlers depend only on the port, a mock "can stand in for a
 real database, letting you test the handler's mapping of repository results"
-(hex-R12:S21/S22) — "impossible with the hard-wired version" (R1/R2).
+(hex-R12:S21/S22) — "impossible with the hard-wired version" (R1).
 
 **Good.**
 ```rust
@@ -696,11 +698,13 @@ mod tests {
 ```
 
 **Bad.** Testing `start` by writing a real `commands.txt` under `$HOME` (or
-the current code, which is untestable: `process_queue` hard-codes the path and
-spawns `fish`).
+the current code, which is untestable: `main` computes the `$HOME`-based queue
+path and passes it to `process_queue`, which spawns `fish` on it).
 
-**How to check.** `grep -rn "#\[cfg(test)\]" src/domain/queue` is non-empty, and
-no test contains `.config/encode_queue` or spawns `fish`.
+**How to check.** (Applies once the Target layout exists.)
+`grep -rn "#\[cfg(test)\]" src/domain/queue` is non-empty, and no test contains
+`.config/encode_queue` or spawns `fish`
+(`grep -rnE "\.config/encode_queue|fish" src/domain 2>/dev/null` → empty).
 
 **Source.** OP1; hex-R12:S21/S22.
 
@@ -744,7 +748,14 @@ rely on it (hex-R12:S22 uses `.unwrap()` throughout its handler tests).
 
 **Bad.** The same call in `inbound/cli.rs` (violates GEN-01).
 
-**How to check.** The lint setup in GEN-01; `grep -rnE "\.unwrap\(\)|\.expect\(" src | grep -v "#\[cfg(test)\]"` → only test modules.
+**How to check.** The test-aware lint in GEN-01 —
+`#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]`
+denies these calls only in non-test builds, so
+`cargo clippy --all-targets --all-features -- -D warnings` fails on a non-test
+`unwrap`/`expect` yet passes a `#[cfg(test)]` fixture that uses them. A plain
+line-based `grep … | grep -v "cfg(test)"` does *not* work here: the `#[cfg(test)]`
+attribute sits on the `mod tests {` line, not on the `unwrap()` line, so it
+false-positives on compliant test code and is deliberately not used.
 
 **Source.** OP6; hex-R12:S22.
 
@@ -775,7 +786,11 @@ let Some(cmd) = matches.get_one::<String>("COMMAND") else {
 `status().expect("Failed to open editor")`.
 
 **How to check.** Crate root: `#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]`
-plus `grep -rnE "\.unwrap\(\)|\.expect\(|panic!|unreachable!" src/ | grep -v "cfg(test)"` → empty.
+so `cargo clippy --all-targets --all-features -- -D warnings` denies `unwrap`/`expect`
+in non-test code while allowing them in `#[cfg(test)]` fixtures — the attribute is
+test-aware, which the broken line-based `grep … | grep -v "cfg(test)"` is not
+(the attribute sits on the `mod tests {` line, so a plain grep false-positives on
+compliant test code and is not used).
 
 **Source.** OP6; hex-R15:S9.
 
@@ -840,14 +855,20 @@ passes on every change; `cargo test` passes. Lints like
 **Why.** A two-crate-free CLI should carry zero `#[allow]` debt; suppression
 comments hide exactly the violations the other conventions forbid.
 
-**Good.** `#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]`
-at the crate root; no `#[allow]` in `src/`.
+**Good.** At the crate root:
+```rust
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+#![deny(clippy::inherent_to_string_shadow_display)]
+```
+no `#[allow]` in `src/`.
 
 **Bad.** `#[allow(clippy::unwrap_used)]` sprinkled over `open_editor` to keep
 the current `.expect(…)` compiling.
 
-**How to check.** `cargo clippy --all-targets --all-features -- -D warnings` exits clean;
-`grep -rn "#\[allow" src` → empty.
+**How to check.** `cargo clippy --all-targets --all-features -- -D warnings` exits clean
+with both lint lines above present at the crate root (so `unwrap_used`/
+`expect_used` and `inherent_to_string_shadow_display` are actually enforced, not just
+present in the docs); `grep -rn "#\[allow" src` → empty.
 
 **Source.** repo toolchain; supports OP6 and TY-05.
 
