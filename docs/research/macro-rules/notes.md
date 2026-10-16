@@ -22,7 +22,12 @@ complexity — the stdlib's `assert_eq!` (S1–S6), axum's `IntoResponse` tuple 
    so `$left` and `$right` are evaluated a single time (S3).
    Reasoning: the fragments may be expensive expressions, not just literals; the article
    notes the primitives in the docs example hide that "$left and $right could be
-   expensive function calls".
+   expensive function calls". Macro hygiene also makes the local-binding pattern safe:
+   the macro-local variables the rules introduce (e.g. `assert_eq!`'s `kind`) "won't
+   conflict with any variable named `kind` where `assert_eq!` is called – a feature
+   known as macro hygiene", so a macro's locals can never collide with caller variables
+   of the same name (prose explanation attached to the S3 pattern; the article link
+   above).
 
 3. **Reference every dependency from an exported macro through `$crate::` (fully
    qualified) or import it inside the rule body.**
@@ -157,3 +162,22 @@ complexity — the stdlib's `assert_eq!` (S1–S6), axum's `IntoResponse` tuple 
    uncommitted.** A `ty` fragment would force concrete types at generation time; `ident`
    placeholders let each item keep its own type until the caller's code instantiates them.
    Demonstrated (as the good form) by S17, using `T1..=T16` as generic parameters.
+
+## Recommended practices (learning advice)
+
+1. **Read standard-library code regularly.** The article's "Light reading" aside asks
+   "Do you regularly read standard library code? I highly recommend it", reasoning that
+   "a strong understanding of stdlib internals makes debugging almost _any_ Rust
+   easier". Supported by S1–S6, the stdlib `assert_eq!` case study the article opens
+   with.
+
+2. **Study the original upstream source of the code you are adapting, not just the
+   article's excerpt.** When walking through `join!`, the article asks: "please do study
+   [the original] when we're done – it's informative on the broader topics of async,
+   safety and Tokio internals" (link to the Tokio `join.rs` source). Supported by
+   S18–S27.
+
+3. **Write your own macros, and study code outside your comfort zone.** The article
+   closes: "The best way to continue dispelling the aura that surrounds `macro_rules!`
+   is to write your own, and supplement by studying code that takes you outside your
+   comfort zone." No snippet — conclusion prose (article link above).

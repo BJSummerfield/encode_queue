@@ -1,7 +1,10 @@
 # Source: writing-production-rust-macros-with-macro-rules
 
 - Source file URL (raw markdown, pinned commit):
-  https://raw.githubusercontent.com/howtocodeit/article-md/b166e26aac8feeff87afa4b6268a4fcf18b90622/guides/writing-production-rust-macros-with-macro-rules.md
+  https://raw.githubusercontent.com/howtocodeit/article-md/b166e26aac8feeff87afa4b6268a4fcf18b90622/guides/writing-production-rust-macros-with-macro_rules.md
+  (note: the file in the repo is named `macro_rules.md`, underscore, not
+  `macro-rules.md`; the hyphen-spelled raw URL 404s at the pinned commit,
+  and only the underscore URL yields the sha256 below — verified 2026-10-16)
 - Article URL (attribution link): https://www.howtocodeit.com/guides/writing-production-rust-macros-with-macro-rules
 - Full sha256 of the raw file: `1eb369476fb90ad5ea6bc0824d4e44bd98f690a450cfff196b97623fd4e748d6`
   (expected prefix `1eb369476fb9` — matches)
