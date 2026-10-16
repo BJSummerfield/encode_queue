@@ -23,16 +23,19 @@ RUN_ID above. If preflight fails, stop and report its error. That is the only ti
 stop early.
 
 After preflight passes, the run is fully autonomous and no human is watching. Never ask me
-anything and never wait for input. When something is ambiguous, decide, log the decision as
-ORCHESTRATOR.md describes, and keep going. You dispatch `bench-worker` and `bench-reviewer`
-sub-agents as async launches, keep up to 3 of them in flight at all times (continuous
-batching), merge finished work, and dispatch follow-up or fix tasks whenever problems come
-up. You keep the ledger current throughout the run.
+anything and never wait for input. Judgment calls belong to the sub-agents: they decide and
+record their decisions in their reports. You keep going.
+
+You are a dispatcher, not a worker (see `AGENTS.md`). You keep 4 lanes of `bench-worker`,
+`bench-reviewer`, and `bench-merger` sub-agents busy at all times (continuous batching),
+log every event to the ledger as it happens, and keep your state in `state.md`. Planning,
+reviewing, triaging, merging, and conflict resolution are all sub-agent work: you dispatch
+them and act only on the short summaries they return.
 
 Isolation is a hard rule. Solve everything from the specs and this run's own branches.
 Never look at other git branches, remotes, PRs, or other directories on this machine, even
 if you suspect the work already exists somewhere, and make every child obey the same rule.
 
-You are done when every item of the P8 checklist in `plan/TASKS.md` is ticked and the PR
-for your run branch is open against `main` (or, if gh is not logged in, the branch is
-pushed and the compare URL is recorded). Do not merge anything.
+You are done when P8.SHIP (see `plan/TASKS.md`) has returned and you have logged it. That
+means the run branch is pushed and the PR is open, or the compare URL is recorded if gh is not
+logged in. Never merge anything into `main`.

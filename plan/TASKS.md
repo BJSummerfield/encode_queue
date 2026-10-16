@@ -37,7 +37,7 @@ These are binding inputs to P2 and to every later review.
   the file is empty.
 - `edit`: opens the queue in `$EDITOR`, default `nvim`.
 
-Known bugs that P3 should flag and P5 may fix (record the choice in `decisions.md`): `ls`
+Known bugs that P3 should flag and P5 may fix (record the choice in the WP report): `ls`
 errors if the file does not exist yet; the exit status of a command is ignored.
 
 ---
@@ -49,7 +49,7 @@ errors if the file does not exist yet; the exit status of a command is ignored.
    isolated clone `REPO`, the metrics dir `BENCH_DIR`, and the toolchain wrapper `DEV`, and it
    starts the background collector. If it exits non-zero, **stop and report its output**.
    Do not retry, work around it, or set override variables.
-2. Confirm that `subagent({ action: "list" })` shows `bench-worker` and `bench-reviewer`.
+2. Confirm that `subagent({ action: "list" })` shows `bench-worker`, `bench-reviewer`, and `bench-merger`.
    If either is missing, stop and report (pi project trust was probably declined).
 3. `$L phase_start P0`, where `L` is `REPO/plan/scripts/ledger.sh` from here on.
 4. In `REPO`: `git switch -c bench/<RUN_ID> bench-base-v1`, then `mkdir -p ~/eq-wt/<RUN_ID>`.
@@ -143,38 +143,70 @@ Reviewer must: open every cited `file:line` and confirm the quote and the violat
 false positives. Run its own sweep of the How-to-check commands for those families and
 report any missed violations.
 
+## Scheduling files (how the orchestrator gets dynamic task lists)
+
+The orchestrator never reads plans or reviews. Whenever a sub-agent creates new tasks, it
+also writes a **DAG file**, `$BENCH_DIR/dag/<name>.tsv`, with one line per task:
+
+```
+<task-id>\t<comma-separated depends_on task-ids or ->\t<spec pointer>
+```
+
+The spec pointer is the `Spec:` value for the worker prompt, for example
+`docs/refactor/PLAN.md section "WP04"` or `$BENCH_DIR/fixes/P7-c1.md section "P7.FIX03"`.
+The orchestrator schedules from that file, and workers and reviewers read the spec it
+points to.
+
 ## P4 — Refactor plan (fan-in ×1), depends on P3.*
 
 **P4.P1** writes `docs/refactor/PLAN.md`, which decomposes the refactor into work packages
-`WP01..WPnn`. Each WP has scope, **files owned**, `depends_on`, the violation IDs it closes,
-and acceptance criteria. Hard constraints:
+`WP01..WPnn`, plus `$BENCH_DIR/dag/P5.tsv` (task IDs `P5.WPnn`).
+
+**Each WP section is a complete, self-contained worker spec.** A worker reads only that
+section (plus CONVENTIONS.md), so it must include:
+- the scope;
+- the **files owned**;
+- the interfaces the WP may rely on and the interfaces it must not change;
+- the violation IDs it closes;
+- acceptance criteria;
+- a `Reviewer must` list.
+
+Hard constraints:
 - Every violation ID from P3 is either closed by a WP or listed under "Deferred" with a
   reason.
 - `WP01` is a serial scaffold. It creates the target module layout, error enum skeletons,
-  and port traits, and the existing behaviour must still work after it.
+  and port traits, and **freezes the public signatures** that later WPs depend on. The
+  existing behaviour must still work after it.
 - After `WP01`, at least 3 WPs can run in parallel, and **no two WPs that can run
-  concurrently own the same file**.
+  concurrently own the same file**. Concurrent WPs must not change a signature another
+  concurrent WP uses.
 - The dependency graph is acyclic and ends with `WPnn = integration` (wiring in `main`,
   dead code removal).
 - Each WP is small enough for one worker session.
 
-Reviewer must: check violation coverage mechanically, check file-ownership disjointness for
-every concurrent pair, check the DAG for cycles, and confirm the plan reaches the
-CONVENTIONS target layout.
+Reviewer must:
+- check violation coverage mechanically;
+- check file-ownership disjointness for every concurrent pair, and check the DAG for
+  cycles;
+- confirm `dag/P5.tsv` matches PLAN.md exactly;
+- confirm each WP section works as a standalone spec;
+- confirm the plan reaches the CONVENTIONS target layout.
 
 ## P5 — Refactor execution (dynamic fan-out), depends on P4
 
-- Run `P5.WP01`, then dispatch the remaining WPs following `PLAN.md`'s DAG, up to
-  `MAX_IN_FLIGHT` children at once. Task IDs are `P5.WPnn`.
-- Each WP reviewer also checks that the violation IDs the WP claims to close are
-  actually closed, and that the behaviour contract still holds.
-- **P5.Z — integration review** (fan-in, reviewer-only task on `RUN_BRANCH`). Re-run all
-  P3 How-to-check commands across the whole tree and confirm every non-deferred violation
-  is gone. Exercise the behaviour contract black-box with `HOME=$(mktemp -d)`: `add`,
-  `ls`, and `start` (if `fish` is present; otherwise note that this is deferred to P6.F2).
-  Failures become `P5.FIXnn` worker tasks with normal review.
+- Dispatch from `$BENCH_DIR/dag/P5.tsv`. Each WP reviewer also checks that the
+  violation IDs the WP claims to close are actually closed, and that the behaviour
+  contract still holds.
+- **P5.Z — integration review** (reviewer-only, on `RUN_BRANCH`). Re-run all P3
+  How-to-check commands across the whole tree and confirm every non-deferred violation is
+  gone. Exercise the behaviour contract black-box with `HOME=$(mktemp -d)`: `add`, `ls`,
+  and `start`.
+- **P5.T — triage** (worker). Reads P5.Z's review. It writes
+  `$BENCH_DIR/fixes/P5.md`, with one self-contained spec per blocker or major fix (task IDs
+  `P5.FIXnn`, files owned disjoint where they can run in parallel), and
+  `$BENCH_DIR/dag/P5-fixes.tsv`. If P5.Z passed, the DAG file is empty and P5 ends.
 
-## P6 — Features (serial harness, then fan-out ×4), depends on P5.Z
+## P6 — Features (serial harness, then fan-out ×4), depends on P5
 
 ### P6.H — Test harness (serial)
 - Support the env var `ENCODE_QUEUE_DIR`. When set, it overrides the queue directory.
@@ -195,12 +227,11 @@ line. Plain `ls` output stays unchanged.
 values. Implement it as a shell-runner **enum** that implements the command-runner port,
 with delegation generated by a `macro_rules!` macro (owner preference 2). Tests use `sh`.
 
-**P6.F3 — Failure handling**: if a command exits non-zero, append
-`<unix_ts>\t<exit_code>\t<command>\n` to `failed.txt` in the queue dir, remove the command
-from the queue, and continue. With `start --stop-on-error`, stop after logging the failure
-and exit 1. Without the flag, exit 0 even if commands failed. Tests set
-`ENCODE_QUEUE_SHELL=sh` and use `false`/`true`. If F2 has not merged yet, this test
-depends on it, so the orchestrator must order the merges F2 → F3.
+**P6.F3 — Failure handling** (depends on P6.F2 as well): if a command exits non-zero,
+append `<unix_ts>\t<exit_code>\t<command>\n` to `failed.txt` in the queue dir, remove the
+command from the queue, and continue. With `start --stop-on-error`, stop after logging the
+failure and exit 1. Without the flag, exit 0 even if commands failed. Tests set
+`ENCODE_QUEUE_SHELL=sh` and use `false`/`true`.
 
 **P6.F4 — Single-runner lock**: `start` creates `queue.lock` in the queue dir with
 `create_new` and writes its PID into it. A second `start` while the lock is held exits with
@@ -208,14 +239,17 @@ code 3 and `queue already running (pid N)`. A stale lock (PID not alive, checked
 `/proc/<pid>`; Linux only, documented) is reclaimed. The lock is removed on normal exit.
 Lock errors are their own `thiserror` variant.
 
-### P6.Z — Feature integration review (fan-in)
+### P6.Z — Feature integration review (reviewer-only)
 Run the full test suite on `RUN_BRANCH`. Manually exercise all four features together
 (for example, `rm` while `start` runs in another process). Confirm no feature broke
-another. Failures become `P6.FIXnn`.
+another.
 
-## P7 — Final adversarial review (fan-out ×3, then fix fan-out, then fan-in)
+### P6.T — Triage (worker)
+Same as P5.T: read P6.Z's review and write `fixes/P6.md` and `dag/P6-fixes.tsv`.
 
-Three independent `bench-reviewer`s on `RUN_BRANCH`. Each writes the standard review file, `review/P7.Ln-r1.md`, which the orchestrator copies to `$BENCH_DIR/reviews/`:
+## P7 — Final adversarial review (fan-out ×3, triage, fix fan-out, re-review)
+
+Three independent reviewer-only tasks on `RUN_BRANCH`:
 
 | ID | Lens |
 |----|------|
@@ -223,27 +257,33 @@ Three independent `bench-reviewer`s on `RUN_BRANCH`. Each writes the standard re
 | P7.L2 | Correctness: try to break it with empty or blank lines, missing trailing newline, unicode, a very long queue, a concurrent `add` during `start`, a missing `$EDITOR`, and a nonexistent dir |
 | P7.L3 | Architecture & API hygiene: dependency direction (grep `use` across layers), `pub` surface, dead code, README accuracy |
 
-Then the orchestrator consolidates all blocker and major findings into `P7.FIXnn` tasks.
-Fixes whose files are disjoint run in parallel. After the fixes merge, **P7.Z** re-runs
-only the lenses that had findings. At most 2 fix cycles; anything left goes into
-`known_issues.md`.
+- **P7.T1 — triage** (worker, depends on P7.L1–L3). Reads the three reviews, dedupes, and
+  writes `fixes/P7-c1.md` (task IDs `P7.FIXnn`, disjoint files owned where possible) and
+  `dag/P7-c1.tsv`. Also writes `$BENCH_DIR/known_issues.md` for any findings it rejects
+  or defers, with reasons.
+- After the fixes merge, **P7.Z** (reviewer-only) re-checks the lenses that had findings.
+  Then **P7.T2** triages it into `fixes/P7-c2.md` and `dag/P7-c2.tsv`. There is no third
+  cycle: anything left goes into `known_issues.md`.
 
-## P8 — Ship (orchestrator, serial)
+## P8 — Ship
 
-- [ ] Dispatch `P8.D1` (worker plus review): README documents `rm`, `ls -n`,
-      `ENCODE_QUEUE_DIR`, `ENCODE_QUEUE_SHELL`, `--stop-on-error`, the lock, and the new
-      layout.
-- [ ] All four cargo gates pass on `RUN_BRANCH` in `REPO` (via `DEV`).
-- [ ] `$L phase_end P8`, then run `plan/scripts/finalize.sh`. It collects the remaining
-      ninfer request records and writes `$BENCH_DIR/report.md`.
-- [ ] Copy `report.md`, `ledger.jsonl`, `requests.jsonl`, `tiles.jsonl`, `server.jsonl`,
-      `manifest.json`, `decisions.md`, `known_issues.md`, and `reviews/` from `$BENCH_DIR`
-      into `.bench/<RUN_ID>/`. Write `.bench/<RUN_ID>/RUN_REPORT.md`: three paragraphs on
-      what happened (the phases that went badly, escalations and drops, notable decisions),
-      followed by the contents of `report.md`. Commit as `P8: run report and ledger`.
-- [ ] `git push -u origin bench/<RUN_ID>`. Then, if `gh auth status` succeeds, run
-      `gh pr create --base main --title "[bench <RUN_ID>] hexagonal refactor + queue features" --body-file .bench/<RUN_ID>/RUN_REPORT.md`.
-      If gh is not authenticated, do not try to log in. Instead, `$L note P8
-      msg="pr-manual"` and finish with the compare URL
-      `https://github.com/BJSummerfield/encode_queue/compare/main...bench/<RUN_ID>`.
-- [ ] Do **not** merge. Remove any remaining worktrees under `~/eq-wt/<RUN_ID>`. Stop.
+1. **P8.D1** (worker, normal review and merge): the README documents `rm`, `ls -n`,
+   `ENCODE_QUEUE_DIR`, `ENCODE_QUEUE_SHELL`, `--stop-on-error`, the lock, and the new
+   layout.
+2. The orchestrator logs `$L phase_end P8`.
+3. **P8.SHIP** (`bench-merger`, in `REPO`, report `reports/P8.SHIP.md`):
+   - Run all four cargo gates via `DEV`, and record any failures in `known_issues.md`.
+   - Run `plan/scripts/finalize.sh`. It waits up to 15 minutes for the last RAM-tier tile.
+   - Copy `report.md`, `ledger.jsonl`, `requests.jsonl`, `tiles.jsonl`, `server.jsonl`,
+     `manifest.json`, `known_issues.md`, `reports/`, and `dag/` from `$BENCH_DIR` into
+     `.bench/<RUN_ID>/`.
+   - Write `.bench/<RUN_ID>/RUN_REPORT.md`: three paragraphs on what happened (the phases
+     that went badly, escalations and drops, notable decisions from the reports),
+     followed by `report.md`. Commit as `P8: run report and ledger`.
+   - `git push -u origin bench/<RUN_ID>`. If `<dev> gh auth status` succeeds, run
+     `<dev> gh pr create --base main --title "[bench <RUN_ID>] hexagonal refactor + queue features" --body-file .bench/<RUN_ID>/RUN_REPORT.md`.
+     Otherwise put the compare URL
+     `https://github.com/BJSummerfield/encode_queue/compare/main...bench/<RUN_ID>` in the
+     report. Do **not** merge.
+4. The orchestrator logs the P8.SHIP `task_end`, removes any remaining worktrees under
+   `~/eq-wt/<RUN_ID>`, and stops.

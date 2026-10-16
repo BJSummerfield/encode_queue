@@ -26,7 +26,8 @@ larger than the drift within a config.
   - `tiles.jsonl`: `/ops/summary?window=15m`, fetched back to back every 15 min from
     preflight to the end of the run, with `gap_ms`/`overlap_ms` per tile.
   - `report.md`: produced by `plan/scripts/ledger_report.sh`.
-  - `decisions.md`, `known_issues.md`, and `reviews/`.
+  - `known_issues.md`, `reports/` (every worker, reviewer, and merger report), and `dag/`
+    (the task lists the run generated).
 - `plan/TASKS.md`: the specs every run was held to.
 
 First, check the manifests. They must differ only in `--spec`/speculative settings and

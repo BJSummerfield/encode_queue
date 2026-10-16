@@ -32,7 +32,7 @@ git -C "$clone" remote set-branches origin main
 extra=$(git -C "$clone" for-each-ref --format='%(refname)' \
   | grep -v -x -E 'refs/heads/main|refs/remotes/origin/main|refs/remotes/origin/HEAD|refs/tags/bench-base-v1' || true)
 [[ -z "$extra" ]] || { echo "unexpected refs in clone: $extra" >&2; exit 1; }
-mkdir -p "$dir"/{reviews,research/raw,scratch}
+mkdir -p "$dir"/{reports,dag,fixes,research/raw,scratch}
 
 # Pinned toolchain: this container has no Rust on PATH. Agents run e.g. `$dir/dev cargo test`.
 (cd "$clone" && nix develop . --profile "$dir/devshell" -c true 2>/dev/null) || { echo "nix dev shell failed" >&2; exit 1; }
@@ -41,7 +41,7 @@ chmod +x "$dir/dev"
 (cd "$clone" && "$dir/dev" cargo build -q) || { echo "cargo build failed" >&2; exit 1; }
 rustc_v=$("$dir/dev" rustc --version)
 ln -sfn "$dir" "$BENCH_ROOT/current"
-: > "$dir/decisions.md"; : > "$dir/known_issues.md"
+: > "$dir/known_issues.md"
 
 jq -n --arg run_id "$run_id" --arg base "$(git -C "$clone" rev-parse bench-base-v1^{commit})" \
   --arg clone "$clone" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg host "$(hostname)" \
@@ -49,7 +49,7 @@ jq -n --arg run_id "$run_id" --arg base "$(git -C "$clone" rev-parse bench-base-
   --argjson uptime "$uptime_min" \
   --argjson server "$(jq '.config' <<<"$summary")" \
   '{run_id: $run_id, base_sha: $base, repo: $clone, preflight_at: $at, host: $host, rustc: $rustc,
-    pi_version: $pi, max_in_flight: 3, max_review_rounds: 3, server_uptime_min_at_preflight: $uptime, server: $server}' \
+    pi_version: $pi, lanes: 4, max_review_rounds: 3, server_uptime_min_at_preflight: $uptime, server: $server}' \
   > "$dir/manifest.json"
 
 BENCH_DIR="$dir" "$(dirname "$0")/ledger.sh" preflight
