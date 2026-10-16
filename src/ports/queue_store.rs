@@ -32,6 +32,9 @@ pub trait QueueStore {
 
     /// Remove the first entry and rewrite the queue without it.
     fn drop_first(&self) -> Result<(), QueueStoreError>;
+
+    /// Replace the entire queue with `entries` (truncate + rewrite).
+    fn write_all(&self, entries: &[QueueEntry]) -> Result<(), QueueStoreError>;
 }
 
 #[cfg(test)]

@@ -93,6 +93,28 @@ impl QueueStore for FileQueueStore {
         }
         Ok(())
     }
+
+    /// Replace the entire queue with `entries` (truncate + rewrite).
+    ///
+    /// Same truncate-open + `map_io_error` + per-entry `writeln!` as
+    /// `drop_first`, with one deliberate difference: `write_all` rewrites
+    /// the file **even for an empty `entries` slice** (the truncate+rewrite
+    /// runs unconditionally, leaving an empty file), whereas `drop_first`
+    /// skips the rewrite on an empty queue.
+    fn write_all(&self, entries: &[QueueEntry]) -> Result<(), QueueStoreError> {
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(self.path.as_path())
+        {
+            Ok(file) => file,
+            Err(err) => return Err(map_io_error(self.path.as_path(), err)),
+        };
+        for entry in entries {
+            writeln!(file, "{}", entry).map_err(QueueStoreError::Io)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

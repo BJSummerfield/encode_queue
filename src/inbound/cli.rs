@@ -34,7 +34,7 @@
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
 use crate::domain::queue::service::{QueueError, QueueService};
-use crate::domain::queue::{QueueEntry, QueueEntryError, QueuePath};
+use crate::domain::queue::{QueueEntry, QueueEntryError, QueueEntryIndex, QueuePath};
 use crate::ports::command_runner::CommandRunner;
 use crate::ports::editor::EditorLauncher;
 use crate::ports::queue_store::QueueStore;
@@ -112,9 +112,43 @@ where
             }
             "start" => Ok(self.service.start()?),
             "ls" => {
+                // Optional single `-n`/`--numbered` flag; the clap builder
+                // rejects any other token with a usage error (exit 2) itself.
+                let numbered = sub.get_flag("numbered");
                 let entries = self.service.ls()?;
-                print!("{}", ls_output(&entries));
+                if numbered {
+                    print!("{}", ls_numbered(&entries));
+                } else {
+                    print!("{}", ls_output(&entries));
+                }
                 Ok(())
+            }
+            "rm" => {
+                // A missing `N` is caught here as a named error rather than a
+                // panic (V-ERR-02); clap also exits 2 on a missing required
+                // arg, so this arm is the defensive, in-process path.
+                let Some(n) = sub.get_one::<String>("N") else {
+                    return Err(CliError::MissingArgument("N".to_owned()));
+                };
+                // ARCH-04: parse the raw index at the boundary into the
+                // domain newtype; 0 / non-numeric / out-of-u32 is a
+                // parse-time rejection (exit 2 via `BadCommand`).
+                let index = QueueEntryIndex::from_str(n).map_err(CliError::BadCommand)?;
+                match self.service.remove_entry(index.as_u32() as u64) {
+                    Ok(()) => Ok(()),
+                    // An in-range-parse but beyond-the-queue position is a
+                    // usage-class failure (exit 2, message on stderr, queue
+                    // unchanged) — the domain's `NoEntry` surfaced through
+                    // the `BadCommand` arm (no new `CliError` variant).
+                    Err(QueueError::NoEntry(pos)) => {
+                        Err(CliError::BadCommand(QueueEntryError::IndexOutOfRange {
+                            requested: pos,
+                        }))
+                    }
+                    // Any other store failure (e.g. a missing queue file) is a
+                    // service error (exit 1).
+                    Err(e) => Err(CliError::Service(e)),
+                }
             }
             "edit" => self
                 .service
@@ -129,8 +163,9 @@ where
 
 /// Build the clap `Command` with the legacy binary's exact configuration —
 /// names, version, author, about strings, `subcommand_required(true)`, the
-/// four subcommands and the required positional `COMMAND` argument — so
-/// help/usage/error output stays byte-identical to the legacy binary.
+/// subcommands (`add`/`start`/`ls`/`rm`/`edit`) and the required positional
+/// `COMMAND` argument — so help/usage/error output stays byte-identical to
+/// the legacy binary.
 fn command() -> Command {
     Command::new("Encode Queue")
         .version("1.0")
@@ -148,7 +183,27 @@ fn command() -> Command {
                 ),
         )
         .subcommand(Command::new("start").about("Starts processing the queue"))
-        .subcommand(Command::new("ls").about("Lists all commands in the queue"))
+        .subcommand(
+            Command::new("ls")
+                .about("Lists all commands in the queue")
+                .arg(
+                    Arg::new("numbered")
+                        .short('n')
+                        .long("numbered")
+                        .help("Prefix each line with its 1-based position")
+                        .action(ArgAction::SetTrue),
+                ),
+        )
+        .subcommand(
+            Command::new("rm")
+                .about("Removes the N-th command from the queue (1-based)")
+                .arg(
+                    Arg::new("N")
+                        .help("The 1-based index of the command to remove")
+                        .required(true)
+                        .action(ArgAction::Set),
+                ),
+        )
         .subcommand(Command::new("edit").about("Opens the queue in an editor"))
 }
 
@@ -163,6 +218,23 @@ fn command() -> Command {
 fn ls_output(entries: &[QueueEntry]) -> String {
     let mut out = String::new();
     for e in entries {
+        out.push_str(e.as_str());
+        out.push('\n');
+    }
+    out.push('\n');
+    out
+}
+
+/// Build the numbered `ls` output (`ls -n`/`ls --numbered`): one line per
+/// entry, `{pos}: {cmd}` with a 1-based position and the raw entry string
+/// verbatim, followed by the same single final blank line as plain `ls`
+/// (`ls_output`) — so an empty queue yields exactly one `"\n"` (the
+/// 2026-10-16 empty-queue convention, identical to plain `ls`).
+fn ls_numbered(entries: &[QueueEntry]) -> String {
+    let mut out = String::new();
+    for (i, e) in entries.iter().enumerate() {
+        out.push_str(&(i + 1).to_string());
+        out.push_str(": ");
         out.push_str(e.as_str());
         out.push('\n');
     }
@@ -257,6 +329,11 @@ mod tests {
             if !entries.is_empty() {
                 entries.remove(0);
             }
+            Ok(())
+        }
+
+        fn write_all(&self, entries: &[QueueEntry]) -> Result<(), QueueStoreError> {
+            *self.entries.lock().map_err(poisoned_store_error)? = entries.to_vec();
             Ok(())
         }
     }
@@ -498,5 +575,103 @@ mod tests {
         let err = cli.dispatch(&matches);
         assert!(matches!(err, Err(CliError::Service(QueueError::Editor(_)))));
         Ok(())
+    }
+
+    #[test]
+    fn cli_rm_removes_the_target_entry() -> Result<(), TestError> {
+        let cli = make_cli(
+            store(vec![
+                queue_entry("a")?,
+                queue_entry("b")?,
+                queue_entry("c")?,
+            ]),
+            runner(None),
+            MockEditor {
+                expected: None,
+                fail: false,
+            },
+        );
+        let matches = command().try_get_matches_from(["encode-queue", "rm", "2"])?;
+
+        assert!(matches!(cli.dispatch(&matches), Ok(())));
+
+        let lines: Vec<String> = cli
+            .service
+            .ls()?
+            .iter()
+            .map(|e| e.as_str().to_owned())
+            .collect();
+        assert_eq!(lines, vec!["a".to_owned(), "c".to_owned()]);
+        Ok(())
+    }
+
+    #[test]
+    fn cli_rm_rejects_zero_and_non_numeric_at_parse_time() -> Result<(), TestError> {
+        for n in ["0", "abc"] {
+            let cli = make_cli(
+                store(vec![queue_entry("a")?]),
+                runner(None),
+                MockEditor {
+                    expected: None,
+                    fail: false,
+                },
+            );
+            let matches = command().try_get_matches_from(["encode-queue", "rm", n])?;
+
+            // Parse-time rejection: `InvalidIndex`, not a service error.
+            let err = cli.dispatch(&matches);
+            assert!(
+                matches!(
+                    err,
+                    Err(CliError::BadCommand(QueueEntryError::InvalidIndex { .. }))
+                ),
+                "n={n}"
+            );
+            // The queue is unchanged.
+            assert_eq!(cli.service.ls()?.len(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cli_rm_maps_index_out_of_range_to_bad_command() -> Result<(), TestError> {
+        let cli = make_cli(
+            store(vec![queue_entry("a")?, queue_entry("b")?]),
+            runner(None),
+            MockEditor {
+                expected: None,
+                fail: false,
+            },
+        );
+        let matches = command().try_get_matches_from(["encode-queue", "rm", "4"])?;
+
+        let err = cli.dispatch(&matches);
+        assert!(matches!(
+            err,
+            Err(CliError::BadCommand(
+                QueueEntryError::IndexOutOfRange { .. }
+            ))
+        ));
+
+        // The queue is left unchanged.
+        assert_eq!(cli.service.ls()?.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn cli_ls_numbered_prints_position_prefix() {
+        // Empty queue: exactly one "\n" (the 2026-10-16 convention, same as
+        // plain `ls`).
+        assert_eq!(ls_numbered(&[]), "\n");
+
+        let entries: Vec<QueueEntry> =
+            match vec![queue_entry("a"), queue_entry("b"), queue_entry("c")]
+                .into_iter()
+                .collect::<Result<Vec<QueueEntry>, QueueEntryError>>()
+            {
+                Ok(entries) => entries,
+                Err(_) => return, // the lenient P5 constructor never fails
+            };
+        assert_eq!(ls_numbered(&entries), "1: a\n2: b\n3: c\n\n");
     }
 }

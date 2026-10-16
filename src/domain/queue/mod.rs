@@ -65,6 +65,38 @@ impl fmt::Display for QueueEntry {
     }
 }
 
+/// A 1-based position in the queue (1 = first entry).
+///
+/// P6.F1: parsed at the `rm` boundary (TY-01) so the service never sees a
+/// raw index. Because the wrapped field is a `u32` (a `Copy` primitive), this
+/// type derives `Copy` in addition to the usual `Debug`/`Clone`/`PartialEq`/
+/// `Eq` — the TY-06 no-`Copy` rule is aimed at `String`/`PathBuf` wrappers and
+/// does not apply here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueEntryIndex(u32);
+
+impl QueueEntryIndex {
+    /// Parse a 1-based index.
+    ///
+    /// Rejects empty, non-numeric, zero and out-of-`u32` inputs with
+    /// [`QueueEntryError::InvalidIndex`]. Leading zeros are accepted ("007"
+    /// parses to 7), as does a single `0`-leading form; overflow to a value
+    /// beyond `u32::MAX` is an `InvalidIndex`.
+    pub fn from_str(input: &str) -> Result<Self, QueueEntryError> {
+        match input.parse::<u32>() {
+            Ok(0) | Err(_) => Err(QueueEntryError::InvalidIndex {
+                input: input.to_owned(),
+            }),
+            Ok(n) => Ok(Self(n)),
+        }
+    }
+
+    /// The 1-based position.
+    pub fn as_u32(&self) -> u32 {
+        self.0
+    }
+}
+
 /// The location of the queue file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct QueuePath(PathBuf);
@@ -130,6 +162,17 @@ pub enum QueueEntryError {
     #[cfg_attr(not(test), allow(dead_code))]
     #[error("command line is empty")]
     Empty,
+    /// A `rm` index was not a valid positive integer (empty, non-numeric, or
+    /// zero / out-of-`u32`).
+    #[error("invalid entry index '{input}': expected a positive integer")]
+    InvalidIndex { input: String },
+    /// A `rm` position was out of range of the queue (0 or beyond its length).
+    ///
+    /// The CLI-facing form of the service's `QueueError::NoEntry` (D2'): the
+    /// same message, carried through `CliError::BadCommand` for the exit-2
+    /// arm.
+    #[error("no queue entry at position {requested}")]
+    IndexOutOfRange { requested: u64 },
 }
 
 #[cfg(test)]
@@ -213,7 +256,41 @@ mod tests {
             Err(QueueEntryError::Empty) => {
                 produced_empty = true;
             }
+            Err(_) => {}
         }
         assert!(!produced_empty);
+    }
+
+    #[test]
+    fn index_from_str_accepts_positive_integers() {
+        assert_eq!(QueueEntryIndex::from_str("1").unwrap().as_u32(), 1);
+        assert_eq!(QueueEntryIndex::from_str("42").unwrap().as_u32(), 42);
+        // Leading zeros are accepted and normalised ("007" -> 7).
+        assert_eq!(QueueEntryIndex::from_str("007").unwrap().as_u32(), 7);
+    }
+
+    #[test]
+    fn index_from_str_rejects_zero_empty_non_numeric_and_overflow() {
+        assert!(matches!(
+            QueueEntryIndex::from_str("0"),
+            Err(QueueEntryError::InvalidIndex { .. })
+        ));
+        assert!(matches!(
+            QueueEntryIndex::from_str(""),
+            Err(QueueEntryError::InvalidIndex { .. })
+        ));
+        assert!(matches!(
+            QueueEntryIndex::from_str("abc"),
+            Err(QueueEntryError::InvalidIndex { .. })
+        ));
+        assert!(matches!(
+            QueueEntryIndex::from_str("-3"),
+            Err(QueueEntryError::InvalidIndex { .. })
+        ));
+        // Overflow beyond u32::MAX is rejected at parse time.
+        assert!(matches!(
+            QueueEntryIndex::from_str("4294967296"),
+            Err(QueueEntryError::InvalidIndex { .. })
+        ));
     }
 }
