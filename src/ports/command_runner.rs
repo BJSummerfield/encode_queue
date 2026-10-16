@@ -11,17 +11,15 @@ use crate::domain::queue::QueueEntry;
 /// variant with an owned payload plus the `Other` catch-all (ERR-04, GEN-03).
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
-    /// Spawning the `fish -c` child failed.
-    #[error("failed to spawn `fish -c`: {0}")]
+    /// Spawning the shell child failed.
+    #[error("failed to spawn the shell: {0}")]
     Spawn(#[source] std::io::Error),
-    /// The child exited with a non-zero exit status.
+    /// The shell command exited with a non-zero exit status.
     ///
-    /// Declared as part of the frozen boundary; the current path discards the
-    /// child's exit status (V-ERR-09 is a deferred P5 behaviour change), so no
-    /// adapter constructs this variant yet.
-    // Deferred landing point (V-ERR-09 exit-status surfacing is a P5/P6 change per PLAN.md); not constructed before then, hence the non-test dead_code suppression.
-    #[cfg_attr(not(test), allow(dead_code))]
-    #[error("`fish -c` exited unsuccessfully: {code}")]
+    /// Surfaced by the runner (V-ERR-09 runner half, P6.F2): a non-zero
+    /// exit after `wait()` is a failure. The service currently propagates it
+    /// unchanged (P6.F3 owns the failure-handling behaviour change).
+    #[error("shell command exited unsuccessfully: {code}")]
     Waited { code: i32 },
     /// Wait I/O failed, or any other unclassifiable runner failure.
     #[error("running the command failed: {0}")]

@@ -110,8 +110,11 @@ where
     /// not run but is still removed — the removal is unconditional), then drops
     /// the first entry by re-reading and rewriting the remainder. A store or
     /// runner error propagates immediately, before the rewrite, leaving the
-    /// queue unmodified up to that point. The child's exit status is discarded
-    /// (WP05-preserved; V-ERR-09 is deferred to P6).
+    /// queue unmodified up to that point. The runner now surfaces a non-zero
+    /// exit status as `RunError::Waited` (V-ERR-09 runner half, P6.F2); this
+    /// SERVICE still propagates it unchanged, so until P6.F3 lands a non-zero
+    /// exit ends `start` with an error (exit 1 in `main`) and the entry
+    /// retained — a transient state P6.F3 will replace with failure handling.
     pub fn start(&self) -> Result<(), QueueError> {
         loop {
             // Fresh read each iteration: the queue "may have been edited"
@@ -129,7 +132,10 @@ where
                 // path (never fails); its fallible `Err` arm maps through
                 // `#[from]` to `QueueError::Invalid` (GEN-01: no `unwrap`).
                 let trimmed = QueueEntry::new(first.as_str().trim())?;
-                // The child's exit status is discarded here (WP05-preserved).
+                // The runner surfaces a non-zero exit as `RunError::Waited`
+                // (V-ERR-09 runner half, P6.F2); the service propagates it
+                // unchanged until P6.F3 (transient: a non-zero exit ends
+                // `start` with an error, entry retained).
                 self.runner.run(&trimmed)?;
             }
             // Unconditional removal: even a blank first line is dropped.
