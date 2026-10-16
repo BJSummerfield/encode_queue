@@ -155,12 +155,16 @@ where
                 // domain newtype; 0 / non-numeric / out-of-u32 is a
                 // parse-time rejection (exit 2 via `BadCommand`).
                 let index = QueueEntryIndex::from_str(n).map_err(CliError::BadCommand)?;
-                match self.service.remove_entry(index.as_u32() as u64) {
+                // P7.FIX01 (D3): the parsed newtype crosses the boundary
+                // un-unwrapped — no raw index anywhere below this line.
+                match self.service.remove_entry(index) {
                     Ok(()) => Ok(()),
                     // An in-range-parse but beyond-the-queue position is a
                     // usage-class failure (exit 2, message on stderr, queue
                     // unchanged) — the domain's `NoEntry` surfaced through
-                    // the `BadCommand` arm (no new `CliError` variant).
+                    // the `BadCommand` arm (no new `CliError` variant). The
+                    // newtype payload keeps the message byte-identical
+                    // (`no queue entry at position 99`).
                     Err(QueueError::NoEntry(pos)) => {
                         Err(CliError::BadCommand(QueueEntryError::IndexOutOfRange {
                             requested: pos,
@@ -481,6 +485,11 @@ mod tests {
         }
     }
 
+    /// Build a `QueueEntryIndex` from a decimal string (test-only; TST-03).
+    fn index(s: &str) -> QueueEntryIndex {
+        QueueEntryIndex::from_str(s).expect("valid index literal")
+    }
+
     fn make_cli(
         store: MockStore,
         runner: MockRunner,
@@ -789,12 +798,15 @@ mod tests {
         let matches = command().try_get_matches_from(["encode-queue", "rm", "4"])?;
 
         let err = cli.dispatch(&matches);
-        assert!(matches!(
-            err,
-            Err(CliError::BadCommand(
-                QueueEntryError::IndexOutOfRange { .. }
-            ))
-        ));
+        assert!(
+            matches!(
+                err,
+                Err(CliError::BadCommand(QueueEntryError::IndexOutOfRange {
+                    requested
+                })) if requested == index("4")
+            ),
+            "the CLI carries the parsed newtype through the NoEntry arm (P7.FIX01)"
+        );
 
         // The queue is left unchanged.
         assert_eq!(cli.service.ls()?.len(), 2);
