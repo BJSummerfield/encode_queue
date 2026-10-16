@@ -64,6 +64,10 @@ pub enum QueueError {
     /// A queued line was rejected by the domain `QueueEntry` constructor.
     #[error("command rejected by the domain: {0}")]
     Invalid(#[from] QueueEntryError),
+    /// `remove_entry` was asked for a position with no entry (0 or beyond the
+    /// queue's length). The queue is left untouched.
+    #[error("no queue entry at position {0}")]
+    NoEntry(u64),
 }
 
 impl<R, C, E> QueueService<R, C, E>
@@ -155,6 +159,32 @@ where
         self.editor.open(at)?;
         Ok(())
     }
+
+    /// Remove the queue entry at 1-based position `pos`, keeping the rest in
+    /// order. `pos == 0` or `pos > <queue length>` is `QueueError::NoEntry(pos)`
+    /// and leaves the queue untouched; a missing queue file surfaces as
+    /// `QueueError::Store(QueueStoreError::QueueFileMissing)` before any
+    /// rewrite (deliberately not softened the way `ls` is).
+    ///
+    /// One `read_all` + one `write_all` (the store's atomic truncate+rewrite):
+    /// the filtered-out entry is the one at 0-based index `pos - 1`. Removing
+    /// the only entry rewrites an empty file (`write_all` runs unconditionally
+    /// on an empty slice).
+    pub fn remove_entry(&self, pos: u64) -> Result<(), QueueError> {
+        let entries = self.store.read_all()?;
+        if pos == 0 || pos > entries.len() as u64 {
+            return Err(QueueError::NoEntry(pos));
+        }
+        let target = pos as usize - 1;
+        let filtered: Vec<QueueEntry> = entries
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != target)
+            .map(|(_, e)| e.clone())
+            .collect();
+        self.store.write_all(&filtered)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -193,6 +223,11 @@ mod tests {
             if !entries.is_empty() {
                 entries.remove(0);
             }
+            Ok(())
+        }
+
+        fn write_all(&self, entries: &[QueueEntry]) -> Result<(), QueueStoreError> {
+            *self.entries.lock().unwrap() = entries.to_vec();
             Ok(())
         }
     }
@@ -569,6 +604,123 @@ mod tests {
 
         let err = service.ls().unwrap_err();
         assert!(matches!(err, QueueError::Store(QueueStoreError::Io(_))));
+    }
+
+    fn make_service(entries: Vec<QueueEntry>) -> QueueService<MockStore, MockRunner, MockEditor> {
+        QueueService::new(
+            MockStore {
+                entries: Mutex::new(entries),
+                read_err: Mutex::new(None),
+                drop_err: Mutex::new(None),
+            },
+            MockRunner {
+                ran: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+            MockEditor {
+                opened: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+        )
+    }
+
+    fn entry_lines(entries: &[QueueEntry]) -> Vec<String> {
+        entries.iter().map(|e| e.as_str().to_owned()).collect()
+    }
+
+    #[test]
+    fn remove_entry_removes_middle_and_keeps_order() {
+        let service = make_service(vec![entry("a"), entry("b"), entry("c")]);
+
+        service.remove_entry(2).unwrap();
+
+        assert_eq!(
+            entry_lines(&service.ls().unwrap()),
+            vec!["a".to_owned(), "c".to_owned()]
+        );
+    }
+
+    #[test]
+    fn remove_entry_removes_first_and_last() {
+        // First.
+        let service = make_service(vec![entry("a"), entry("b"), entry("c")]);
+        service.remove_entry(1).unwrap();
+        assert_eq!(
+            entry_lines(&service.ls().unwrap()),
+            vec!["b".to_owned(), "c".to_owned()]
+        );
+
+        // Last.
+        let service = make_service(vec![entry("a"), entry("b"), entry("c")]);
+        service.remove_entry(3).unwrap();
+        assert_eq!(
+            entry_lines(&service.ls().unwrap()),
+            vec!["a".to_owned(), "b".to_owned()]
+        );
+    }
+
+    #[test]
+    fn remove_entry_removing_the_only_entry_leaves_an_empty_queue() {
+        let service = make_service(vec![entry("a")]);
+
+        service.remove_entry(1).unwrap();
+
+        assert!(service.ls().unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_entry_out_of_range_is_no_entry_and_leaves_the_store_untouched() {
+        // `pos == 0`.
+        let service = make_service(vec![entry("a"), entry("b"), entry("c")]);
+        let err = service.remove_entry(0).unwrap_err();
+        assert!(matches!(err, QueueError::NoEntry(0)));
+        assert_eq!(
+            entry_lines(&service.ls().unwrap()),
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
+        );
+
+        // `pos > len`.
+        let service = make_service(vec![entry("a"), entry("b"), entry("c")]);
+        let err = service.remove_entry(4).unwrap_err();
+        assert!(matches!(err, QueueError::NoEntry(4)));
+        assert_eq!(
+            entry_lines(&service.ls().unwrap()),
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
+        );
+    }
+
+    #[test]
+    fn remove_entry_on_empty_queue_is_no_entry() {
+        let service = make_service(Vec::new());
+        let err = service.remove_entry(1).unwrap_err();
+        assert!(matches!(err, QueueError::NoEntry(1)));
+    }
+
+    #[test]
+    fn remove_entry_on_missing_file_propagates_the_store_error() {
+        let service = QueueService::new(
+            MockStore {
+                entries: Mutex::new(Vec::new()),
+                read_err: Mutex::new(Some(QueueStoreError::QueueFileMissing(PathBuf::from(
+                    "/tmp/mock-home/queue/commands.txt",
+                )))),
+                drop_err: Mutex::new(None),
+            },
+            MockRunner {
+                ran: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+            MockEditor {
+                opened: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+        );
+
+        let err = service.remove_entry(1).unwrap_err();
+        assert!(matches!(
+            err,
+            QueueError::Store(QueueStoreError::QueueFileMissing(_))
+        ));
     }
 
     #[test]
