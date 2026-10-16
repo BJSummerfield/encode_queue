@@ -27,9 +27,18 @@ Only P5/P6 may change the specific bug behaviours named below.
 Concrete observable points that must hold (from the V-ARCH-05 empirical notes in
 `docs/audit/architecture.md`):
 
-- `add` writes the raw `<CMD>` verbatim followed by a newline (no trim/validation
-  at the boundary yet — see V-TY-01/V-TY-08; validation is *added* but must not
-  reject the same inputs the queue currently accepts in the preserved flows).
+- `add` writes the raw `<CMD>` verbatim followed by a newline and exits 0, with
+  **no trim and no blank rejection**: an empty or whitespace-only command is
+  accepted exactly as today (the blank/whitespace line is enqueued verbatim).
+  `QueueEntry` is introduced but its constructor is **lenient** (stores the raw
+  line; it does not reject blank input), so this is preserved (see V-TY-01/
+  V-TY-08). The audits' suggested *strict* behaviour — trim + reject blank
+  (`from_str("   ")` → `Empty`, so `add` of a blank command exits 2) — is **not**
+  applied in this refactor and is owned by **P5/P6** (see Deferred).
+- `ls` prints the queue file **verbatim**, including the blank/whitespace-only
+  lines that `add` can create. `read_all` (WP04) parses each line through the
+  lenient `QueueEntry` (every line, blank included, is a valid entry) and prints
+  it back unchanged.
 - `start` on a **missing or empty** file: empty file → exit 0, no output.
   (Missing-file `ls`/`start` currently exits 1 with an I/O error — that missing-file
   *exit code* is preserved here and its change is owned by **P6**, see Deferred.)
@@ -42,7 +51,13 @@ Concrete observable points that must hold (from the V-ARCH-05 empirical notes in
 Where a P3 violation's *suggested fix* would change one of these observable
 behaviours, the WP **implements the structural fix** (newtypes, ports, error
 enums, layout) but **keeps the observable behaviour identical**, and the
-behaviour change itself is deferred to P5/P6.
+behaviour change itself is deferred to P5/P6. A concrete instance of this rule is
+the `QueueEntry` whitespace/blank validation: the structural fix (a `QueueEntry`
+newtype with a canonical fallible constructor, `FromStr`, and boundary parsing in
+`add`/`ls`/`start`) is implemented in WP02/WP04/WP08/WP09, but the constructor is
+kept **lenient** (accepts blank, stores the raw line verbatim; `start` keeps its
+current trim/blank-skip) so `add`/`ls`/`start` are byte-for-byte unchanged, and
+the strict trim + `Empty` rejection is **deferred** (see Deferred).
 
 ---
 
@@ -91,13 +106,27 @@ behaviour change itself is deferred to P5/P6.
 
 - **scope.** Finalize `src/domain/queue/mod.rs`: `QueueEntry` (canonical fallible
   constructor `new`, `FromStr` delegating to `new`, `TryFrom<&str>` as a one-line
-  delegation to `from_str`, `as_str`, `Display`; `QueueEntryError::Empty` for
-  blank input), `QueuePath` (private `PathBuf`, `as_path`, `Display`,
-  `Hash`), and `Editor` (private `String`, constructor applying the `nvim`
-  default, `as_str`, `Display`). Private fields only; no `Deref`/`Borrow`; derive
-  `Debug, Clone, PartialEq, Eq` (+ `Hash` where meaningful), no `Copy`/`Default`.
-  Add focused per-constructor success/failure tests (TST-02), e.g.
-  `QueueEntry::from_str("   ")` → `Empty` and `from_str("nix build .")` → `Ok`.
+  delegation to `from_str`, `as_str`, `Display`; a `QueueEntryError::Empty`
+  variant is *declared* — it is CONVENTIONS.md's canonical error — but is
+  **not produced** on the P5 path, see below), `QueuePath` (private `PathBuf`,
+  `as_path`, `Display`, `Hash`), and `Editor` (private `String`, constructor
+  applying the `nvim` default, `as_str`, `Display`). Private fields only; no
+  `Deref`/`Borrow`; derive `Debug, Clone, PartialEq, Eq` (+ `Hash` where
+  meaningful), no `Copy`/`Default`. **Lenient by design (behaviour
+  preservation):** the constructor stores the raw line **verbatim** (no trim) and
+  accepts empty/whitespace-only input, so `add`/`ls` stay byte-for-byte as today
+  (Behaviour contract). The strict trim + `Empty` reject that CONVENTIONS.md's
+  canonical `QueueEntry` shows is the **deferred** P5/P6 behaviour change (see
+  Deferred), not applied here; the declared-but-unproduced `Empty` variant is
+  retained (it is the domain's public error type for the deferred strict path).
+  If the never-constructed variant trips a dead-code/clippy warning in this
+  refactor, the WP02 `#[cfg(test)]` module keeps it referenced (the TST-02 suite
+  covers the deferred `Empty` arm alongside the lenient `Ok` cases), so the
+  `-D warnings` gate stays green.
+  Add focused per-constructor tests (TST-02) matching the *current* behaviour:
+  `QueueEntry::from_str("nix build .")` → `Ok` and `from_str("   ")` → `Ok`
+  (blank is a valid entry, stored verbatim; the strict `Empty` reject is
+  deferred).
 - **files owned.** `src/domain/queue/mod.rs`.
 - **depends_on.** WP01.
 - **violation IDs it closes.** V-TY-06 (the three newtypes now exist), V-TY-07
@@ -113,7 +142,10 @@ behaviour change itself is deferred to P5/P6.
     -vE "fn (from_str|try_from|from_utf8)\b"` → empty.
   - `cargo test` passes; `cargo clippy --all-targets --all-features -- -D
     warnings` clean for the domain module.
-  - No `is_empty()`/`trim()` validation guard outside a constructor (TY-01).
+  - The `QueueEntry` constructor performs no trim/blank validation (lenient: it
+    stores the line verbatim) — the strict `Empty` reject is deferred (see
+    Deferred). The `start` blank-skip trim that lives in the service (WP08) is
+    the *preserved* current behaviour, not new validation (TY-01).
 
 ### WP03 — Ports, error enums, dispatch macro
 
@@ -148,14 +180,19 @@ behaviour change itself is deferred to P5/P6.
 
 - **scope.** Implement `FileQueueStore` in `src/outbound/queue_file.rs` behind the
   `QueueStore` port: `read_all() -> Result<Vec<QueueEntry>, QueueStoreError>`
-  (parse each line through `QueueEntry`'s `FromStr`, map a missing file to
-  `QueueStoreError::QueueFileMissing(PathBuf)` and other I/O to `QueueStoreError::Io`),
+  (parse each line through `QueueEntry`'s lenient `FromStr` — every line,
+  including blank/whitespace-only ones, parses to a valid entry and is kept —
+  map a missing file to `QueueStoreError::QueueFileMissing(PathBuf)` and other I/O
+  to `QueueStoreError::Io`),
   `append(&QueueEntry)`, and the rewrite-without-first-line used by `start`. The
   store owns its `QueuePath` (injected from config), so no raw `PathBuf` crosses
   the port. `OpenOptions`/`fs` details stay confined to this file (ARCH-03).
   **Preserved behaviour:** `ls`-on-missing-file still resolves to a non-success
   outcome (the `QueueFileMissing` variant → exit 1 at `main`); mapping it to
-  an empty-queue/exit-0 is the **P6** change and is NOT done here.
+  an empty-queue/exit-0 is the **P6** change and is NOT done here. Blank and
+  whitespace-only lines are parsed (lenient `FromStr`) and preserved, so `ls`
+  prints them **verbatim** exactly as today (not omitted/trimmed; the strict
+  reject is deferred, see Deferred).
 - **files owned.** `src/outbound/queue_file.rs`.
 - **depends_on.** WP01, WP02, WP03.
 - **violation IDs it closes.** V-ERR-08 (`ls`'s conflated `read_to_string` is
@@ -237,22 +274,35 @@ behaviour change itself is deferred to P5/P6.
 
 - **scope.** Implement `QueueService` in `src/domain/queue/service.rs`
   (`QueueService<R: QueueStore, C: CommandRunner, E: EditorLauncher>`) with
+  **note on generic arity:** the service takes a **third** port generic
+  `E: EditorLauncher` beyond CONVENTIONS.md's canonical `QueueService<R, C>`
+  shorthand, because TST-01 requires in-crate mock implementations of **all
+  three** ports (`QueueStore`/`CommandRunner`/`EditorLauncher`), which the
+  two-generic `<R, C>` form cannot inject; this deviation from the canonical
+  arity is intentional.
   `add`/`ls`/`start`/`edit` methods that take and return only domain newtypes and
   the `QueueError` enum (which composes `QueueStoreError`/`RunError`/
   `EditorError`/`QueueEntryError` via `#[from]`, never duplicating them). `start`
-  reads through the store, and for a non-blank first line calls `runner.run`
-  then re-reads (it may have been edited) and rewrites without the first line,
-  repeating until empty — **preserving** the discard-exit-status behaviour (WP05)
-  and the unconditional line removal. No `&str`/`String` parameters on any
-  service method; no `is_empty`/`trim` guards. Add `#[cfg(test)]` mock-port tests
+  reads through the store, and for a non-blank first line (decided by
+  `entry.as_str().trim().is_empty()`, as today) calls `runner.run` with the
+  trimmed line, then re-reads (it may have been edited) and rewrites the
+  remaining lines without the first line, repeating until empty — **preserving**
+  the discard-exit-status behaviour (WP05), the unconditional line removal, and
+  the current **trim-before-run / blank-skip** semantics (the `start` behaviour
+  is byte-for-byte unchanged; moving validation to a strict "trust non-blank"
+  `QueueEntry` is the deferred V-TY-02 behaviour change, see Deferred).
+  No `&str`/`String` parameters on any service method (all values are newtypes;
+  the blank-skip/trim operate on `QueueEntry`'s `as_str`, not a raw file
+  `String`). Add `#[cfg(test)]` mock-port tests
   (TST-01) covering the add/start mapping, e.g.
   `start_removes_entry_after_successful_run`.
 - **files owned.** `src/domain/queue/service.rs`.
 - **depends_on.** WP02, WP03.
 - **violation IDs it closes.** V-ARCH-04 (business code sees only newtypes;
   `grep -n "pub fn" src/domain/queue/service.rs` shows no `&str`/`String`
-  params), V-TY-02 (file-line validation removed from orchestration — the read
-  site parses into `QueueEntry` and treats `Empty` as skip), V-TY-04
+  params), V-TY-02 (file-line handling now operates on `QueueEntry`, not a raw
+  `String` read straight from the file; the current trim/blank-skip is preserved
+  and its removal is deferred — see Deferred), V-TY-04
   (`process_queue(&Path)` is replaced by a service method that never names the
   path), V-ERR-06 (part: `QueueError` composes the boundary enums via `#[from]`),
   V-DT-03 (adds `#[cfg(test)]` mock tests in `src/domain/`).
@@ -269,11 +319,15 @@ behaviour change itself is deferred to P5/P6.
 - **scope.** Implement `src/inbound/cli.rs`: the clap `Cli` that parses the
   `add`/`start`/`ls`/`edit` subcommands, converts the raw `add` argument into a
   `QueueEntry` at the boundary (`QueueEntry::from_str(raw).map_err(CliError::
-  BadCommand)`), and dispatches to the service. `CliError` covers
-  `BadCommand(QueueEntryError)`, `MissingArgument(String)`, and the service-level
-  errors. The subcommand `match` is exhaustive over the real variants (no
-  `unreachable!()`); the `COMMAND` value is taken with `let Some(cmd) = … else
-  { … MissingArgument }` (no `unwrap`).
+  BadCommand)`), and dispatches to the service. Because the constructor is
+  **lenient** (see WP02 / Behaviour contract), `from_str` accepts blank/
+  whitespace input, so `add "   "` enqueues the blank line verbatim and exits 0
+  exactly as today; `CliError::BadCommand` is wired for the **deferred** strict
+  path but is not triggered by any input the current binary accepts. `CliError`
+  covers `BadCommand(QueueEntryError)`, `MissingArgument(String)`, and the
+  service-level errors. The subcommand `match` is exhaustive over the real
+  variants (no `unreachable!()`); the `COMMAND` value is taken with
+  `let Some(cmd) = … else { … MissingArgument }` (no `unwrap`).
 - **files owned.** `src/inbound/cli.rs`.
 - **depends_on.** WP08 (needs the service), WP02 (needs `QueueEntry`).
 - **violation IDs it closes.** V-TY-01 (the raw `add` argument is translated to a
@@ -282,8 +336,11 @@ behaviour change itself is deferred to P5/P6.
   match / `CliError` variant).
 - **acceptance criteria.**
   - `grep -rnE "unwrap\(\)|unreachable!|expect\(" src/inbound/` → empty.
-  - `grep -rn "clap" src/` matches only `src/inbound/` (and `Cargo.toml`), never
-    `src/(domain|ports)/`.
+  - `grep -rn "clap" src/ | grep -E "^src/(domain|ports)/"` → empty (domain and
+    ports never import `clap`; satisfiable once **WP09 alone** has landed). The
+    stronger form "clap appears only in `src/inbound/` (and `Cargo.toml`)" holds
+    only after **WP10** rewrites `src/main.rs` (which still carries
+    `use clap::…` until then) and is checked under WP10, not at WP09.
   - `cargo build` + `cargo clippy … -D warnings` clean.
 
 ### WP10 — Integration (wire `main`, crate-root lints, dead-code removal)
@@ -315,8 +372,10 @@ behaviour change itself is deferred to P5/P6.
   - V-DT-02: `grep -rn "cfg_attr(not(test)\|deny(clippy" src` is non-empty;
     `grep -rn "#\[allow" src` → empty.
   - Behaviour contract holds end-to-end: smoke `add`/`ls`/`start`/`edit` against an
-    isolated `$HOME` and confirm add-appends, ls-prints, start-drains (dropping
-    exit status per V-ERR-09), edit-opens.
+    isolated `$HOME` and confirm add-appends, ls-prints (including a blank/
+    whitespace-only line enqueued by `add "   "`, printed verbatim — behaviour
+    preserved, strict reject deferred), start-drains (dropping exit status per
+    V-ERR-09), edit-opens.
   - `cargo fmt` applied; `cargo clippy --all-targets --all-features -- -D
     warnings` exits 0; `cargo test` passes.
 
@@ -382,6 +441,23 @@ concurrent with nothing).
   refactor (a `QueueStoreError::QueueFileMissing` → message + exit 1 at `main`),
   and the change to "missing → empty queue, exit 0" is owned by **P6** per the
   audit.
+- **V-TY-01/V-TY-02/V-TY-08 (behaviour half) — strict whitespace/blank
+  validation.** The audits' suggested fix for `QueueEntry` is trim + reject
+  blank (`from_str("   ")` → `Empty`). Applied at the boundary it would change
+  three observable behaviours the current binary has today: `add` of an
+  empty/whitespace-only command (currently exit 0, blank line enqueued
+  verbatim → would become exit 2, nothing enqueued), `ls` (currently prints
+  blank/whitespace-only lines verbatim → would omit/trim them), and `start`
+  (currently trims before `fish -c` and skips blank lines → would trust every
+  entry as non-blank). This refactor implements the **structural** half
+  (`QueueEntry` newtype + `FromStr` + boundary parsing in WP02/WP04/WP08/WP09)
+  but keeps the constructor **lenient** (accepts blank, stores the raw line
+  verbatim; `start` keeps trim/blank-skip), so all three behaviours are
+  byte-for-byte preserved. The strict trim + `Empty` rejection is a behaviour
+  change owned by **P5/P6** (consistent with the audits' suggested fixes and
+  CONVENTIONS.md's canonical `QueueEntry`), landing when the queue-domain
+  validation behaviour is adopted. The structural IDs V-TY-01 (WP09), V-TY-02
+  (WP08), V-TY-08 (WP04) remain closed; only this behaviour half is deferred.
 
 ## Coverage check (all 25 P3 violations)
 
@@ -391,7 +467,8 @@ V-ERR-02 (WP09), V-ERR-03 (WP10), V-ERR-04 (WP09), V-ERR-05 (WP06),
 V-ERR-06 (WP03/WP08), V-ERR-07 (WP10), V-ERR-08 (WP04), V-TY-01 (WP09), V-TY-02 (WP08),
 V-TY-03 (WP07), V-TY-04 (WP08), V-TY-05 (WP06), V-TY-06 (WP02), V-TY-07 (WP02),
 V-TY-08 (WP04), V-DT-01 (WP10), V-DT-02 (WP10), V-DT-03 (WP02/WP08).
-Deferred: V-ERR-09 (P5), V-ARCH-05 behaviour half (P6).
+Deferred: V-ERR-09 (P5), V-ARCH-05 behaviour half (P6), V-TY-01/V-TY-02/V-TY-08
+behaviour half (strict whitespace/blank validation; P5/P6).
 
 Every violation ID from the P3 audits (V-ARCH-01..05, V-ERR-01..09, V-TY-01..08,
 V-DT-01..03) is either closed by at least one WP or listed under Deferred. ✓
