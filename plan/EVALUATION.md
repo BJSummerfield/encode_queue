@@ -20,10 +20,11 @@ larger than the drift within a config.
   in its PR):
   - `manifest.json`: full ninfer config and argv, pi and rustc versions.
   - `ledger.jsonl`: phase, task, review, merge, and gate events with wall-clock time, pi
-    child usage, and a ninfer counter snapshot.
+    child usage, and a snapshot of ninfer gauges.
   - `requests.jsonl`: every ninfer request in the run.
   - `server.jsonl`: gauges every 5 s.
-  - `summary.json`: ninfer's own whole-run aggregates.
+  - `tiles.jsonl`: `/ops/summary?window=15m`, fetched back to back every 15 min from
+    preflight to the end of the run, with `gap_ms`/`overlap_ms` per tile.
   - `report.md`: produced by `plan/scripts/ledger_report.sh`.
   - `decisions.md`, `known_issues.md`, and `reviews/`.
 - `plan/TASKS.md`: the specs every run was held to.
@@ -43,7 +44,7 @@ phase windows in the ledger.
 | TTFT p50/p90, queue p90 | Queueing appears when 4 sequences are busy |
 | Prefix cache: `cached / prompt`; re-prefilled tokens | Long agent conversations depend on this |
 | Preemptions, paused seconds, replayed tokens | KV pressure. Lower-precision KV (`k8v4`) should mean fewer of these |
-| Spill pages, RAM restores, host→device KV bytes and seconds | From ledger counter deltas between `phase_start`/`phase_end`. Valid only if preflight showed zeroed counters |
+| Spill pages, RAM restores, host→device KV bytes and seconds | From `tiles.jsonl`. The run total is exact if the tile gaps are ~0. Per-phase values are approximate at 15-minute resolution. Never use ninfer `*_total` counters: they span the whole retained log |
 | Non-`stop_token` finishes | `output_limit`, `context_capacity`, or `cancelled` = harmed agent turns |
 
 ## B. Agentic process (trajectory-attributable)
@@ -94,7 +95,7 @@ Do not look at the mapping until every row is scored. Score each item 0–5 and 
   and shape), and the final `src/` layout across the four runs. Did the same config
   converge on the same design?
 - Manifest differences beyond spec and KV dtype; source page hash differences between
-  runs (`docs/research/*/SOURCE.md`); stale-counter overrides (`ALLOW_STALE_LOG`).
+  runs (`docs/research/*/SOURCE.md`); tile gaps (collector downtime); server uptime at preflight.
 
 ## Output
 

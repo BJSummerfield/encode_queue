@@ -1,4 +1,10 @@
-# Sourced by the bench scripts. Shared paths and the ninfer counter snapshot.
+# Sourced by the bench scripts. Shared paths, gauge snapshots, and timestamped collection.
+#
+# ninfer's ops service sums over its retained log (last 50k requests across restarts), so
+# its *_total counters are never used here. Everything is selected by timestamp instead:
+#   requests.jsonl  per-request records with ts > preflight
+#   tiles.jsonl     /ops/summary?window=15m fetched every 15 min, back to back (RAM tier, preemptions)
+#   server.jsonl    point-in-time gauges every 5 s
 NINFER_OPS="${NINFER_OPS:-https://llm.mist-gamma.ts.net:8443/ops}"
 BENCH_ROOT="${BENCH_ROOT:-$HOME/encode_queue_bench}"
 BENCH_DIR="${BENCH_DIR:-$BENCH_ROOT/current}"
@@ -6,13 +12,13 @@ BENCH_DIR="${BENCH_DIR:-$BENCH_ROOT/current}"
 now_iso() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
 now_ms() { date +%s%3N; }
 
-# Prints one compact JSON object of ninfer counters/gauges (labels summed), or {"unreachable":true}.
+# Prints point-in-time ninfer gauges as one compact JSON object, or {"unreachable":true}.
 ninfer_snapshot() {
   local body
   body=$(curl -sf --max-time 3 "$NINFER_OPS/metrics") || { echo '{"unreachable":true}'; return; }
   awk '!/^#/ && NF >= 2 { name = $1; sub(/\{.*/, "", name); sum[name] += $NF }
        END { for (n in sum) printf "%s %s\n", n, sum[n] }' <<<"$body" \
-    | grep -E '^ninfer_(requests|prompt_tokens|cached_prompt_tokens|computed_prefill_tokens|completion_tokens|mtp_drafted_tokens|mtp_accepted_tokens|ram_restores|ram_kv_h2d_bytes|ram_kv_h2d_seconds|preemptions|snapshot_restores|replay_restores|replayed_tokens|spill_pages|log_parse_errors)_total |^ninfer_(running|waiting|paused|host_kv_bytes|host_context_bytes|decode_tokens_per_second|prefill_tokens_per_second|decode_batch_size) ' \
+    | grep -E '^ninfer_(running|waiting|paused|host_kv_bytes|host_context_bytes|device_state_slots_used|decode_tokens_per_second|prefill_tokens_per_second|decode_batch_size) ' \
     | jq -Rn '[inputs | split(" ") | {key: (.[0] | ltrimstr("ninfer_")), value: (.[1] | tonumber)}] | from_entries'
 }
 
@@ -44,4 +50,27 @@ stop_sampler() {
   pid=$(cat "$dir/sampler.pid" 2>/dev/null || true)
   [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
   rm -f "$dir/sampler.pid"
+}
+
+TILE_MS="${TILE_MS:-900000}"  # override only for testing; the ops window is fixed at 15m
+
+# Epoch ms at which the most recent tile window ended (or preflight, if there is none yet).
+last_tile_end() {
+  local dir="$1" t
+  t=$( { tail -n 1 "$dir/tiles.jsonl" 2>/dev/null || true; } | jq -r '.window_end_ms // empty')
+  [[ -n "$t" ]] || t=$(jq -s 'map(select(.event == "preflight")) | first.epoch_ms' "$dir/ledger.jsonl")
+  echo "$t"
+}
+
+# Appends one 15-minute tile. Records the gap since the previous tile, which is
+# 0 (give or take ms) when tiles are back to back and >0 if the collector was down.
+collect_tile() {
+  local dir="$1" prev now body
+  prev=$(last_tile_end "$dir"); now=$(now_ms)
+  body=$(curl -sf --max-time 30 "$NINFER_OPS/summary?window=15m") || { echo "warning: tile fetch failed at $(now_iso)" >&2; return; }
+  jq -c --argjson end "$now" --argjson prev "$prev" --argjson tile "$TILE_MS" \
+    '{window_start_ms: ($end - $tile), window_end_ms: $end, gap_ms: ([($end - $tile) - $prev, 0] | max),
+      overlap_ms: ([$prev - ($end - $tile), 0] | max), requests: (.requests // 0),
+      ram_tier: (.ram_tier // {}), scheduling: (.scheduling // {}), engine_samples: (.engine_samples // {})}' \
+    <<<"$body" >> "$dir/tiles.jsonl"
 }

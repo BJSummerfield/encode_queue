@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Usage: preflight.sh <run-id>     e.g. preflight.sh mtp-run1
-# Run from any checkout of main, AFTER ninfer was restarted with a rotated request log.
+# Run from any checkout of main, right after restarting ninfer with this run's config.
 # Creates an isolated single-branch clone at ~/eq-runs/<run-id> (only main + the base tag
 # exist in it, so agents cannot see other branches), the metrics dir, and the manifest.
 set -euo pipefail
@@ -15,10 +15,12 @@ origin=$(git remote get-url origin)
 [[ -e "$clone" ]] && { echo "$clone already exists; refusing to overwrite" >&2; exit 1; }
 
 summary=$(curl -sf --max-time 5 "$NINFER_OPS/summary?window=15m") || { echo "ninfer ops unreachable at $NINFER_OPS" >&2; exit 1; }
-logged=$(curl -sf --max-time 5 "$NINFER_OPS/metrics" | awk '/^ninfer_requests_total/ { s += $NF } END { print s + 0 }')
-if (( logged > 50 )) && [[ "${ALLOW_STALE_LOG:-}" != 1 ]]; then
-  echo "ninfer ops already counts $logged requests. Rotate the request log and restart ninfer +" >&2
-  echo "ninfer-metrics first (see plan/README.md), or set ALLOW_STALE_LOG=1 to accept unreliable deltas." >&2
+# Each run must start on a freshly restarted server (empty RAM tier, cold prefix cache).
+# Old log contents are fine: all metrics are selected by timestamp.
+started=$(jq -r '.config.started_unix_ms // 0' <<<"$summary")
+uptime_min=$(( ($(now_ms) - started) / 60000 ))
+if (( started == 0 || uptime_min > ${MAX_UPTIME_MIN:-120} )); then
+  echo "ninfer has been up ${uptime_min} min. Restart ninfer with this run's config right before the run." >&2
   exit 1
 fi
 
@@ -44,10 +46,10 @@ ln -sfn "$dir" "$BENCH_ROOT/current"
 jq -n --arg run_id "$run_id" --arg base "$(git -C "$clone" rev-parse bench-base-v1^{commit})" \
   --arg clone "$clone" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg host "$(hostname)" \
   --arg rustc "$rustc_v" --arg pi "$(pi --version 2>/dev/null || echo unknown)" \
-  --argjson stale "$([[ "${ALLOW_STALE_LOG:-}" == 1 ]] && echo true || echo false)" \
+  --argjson uptime "$uptime_min" \
   --argjson server "$(jq '.config' <<<"$summary")" \
   '{run_id: $run_id, base_sha: $base, repo: $clone, preflight_at: $at, host: $host, rustc: $rustc,
-    pi_version: $pi, max_in_flight: 3, max_review_rounds: 3, stale_counters: $stale, server: $server}' \
+    pi_version: $pi, max_in_flight: 3, max_review_rounds: 3, server_uptime_min_at_preflight: $uptime, server: $server}' \
   > "$dir/manifest.json"
 
 BENCH_DIR="$dir" "$(dirname "$0")/ledger.sh" preflight

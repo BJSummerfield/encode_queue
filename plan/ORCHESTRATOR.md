@@ -138,7 +138,7 @@ SPEC UNDER REVIEW
 ## Ledger (mandatory, used to score the run)
 
 `$L` appends to `$BENCH_DIR/ledger.jsonl`. It timestamps every line and adds a snapshot of
-ninfer's counters automatically. Your job is to call it at the right moments and pass the
+ninfer's live gauges automatically. Your job is to call it at the right moments and pass the
 child's usage numbers:
 
 ```

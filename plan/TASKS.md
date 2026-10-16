@@ -45,7 +45,7 @@ errors if the file does not exist yet; the exit status of a command is ignored.
 ## P0 — Setup (orchestrator, serial)
 
 1. **Preflight**, from your session's workspace:
-   `plan/scripts/preflight.sh <RUN_ID>`. It checks that ninfer was reset, creates the
+   `plan/scripts/preflight.sh <RUN_ID>`. It checks that ninfer was restarted recently, creates the
    isolated clone `REPO`, the metrics dir `BENCH_DIR`, and the toolchain wrapper `DEV`, and it
    starts the background collector. If it exits non-zero, **stop and report its output**.
    Do not retry, work around it, or set override variables.
@@ -221,7 +221,7 @@ only the lenses that had findings. At most 2 fix cycles; anything left goes into
 - [ ] All four cargo gates pass on `RUN_BRANCH` in `REPO` (via `DEV`).
 - [ ] `$L phase_end P8`, then run `plan/scripts/finalize.sh`. It collects the remaining
       ninfer request records and writes `$BENCH_DIR/report.md`.
-- [ ] Copy `report.md`, `ledger.jsonl`, `requests.jsonl`, `summary.json`,
+- [ ] Copy `report.md`, `ledger.jsonl`, `requests.jsonl`, `tiles.jsonl`, `server.jsonl`,
       `manifest.json`, `decisions.md`, `known_issues.md`, and `reviews/` from `$BENCH_DIR`
       into `.bench/<RUN_ID>/`. Write `.bench/<RUN_ID>/RUN_REPORT.md`: three paragraphs on
       what happened (the phases that went badly, escalations and drops, notable decisions),
