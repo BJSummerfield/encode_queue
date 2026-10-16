@@ -1,3 +1,9 @@
+mod config;
+mod domain;
+mod inbound;
+mod outbound;
+mod ports;
+
 use clap::{Arg, ArgAction, Command};
 use std::{
     env,
