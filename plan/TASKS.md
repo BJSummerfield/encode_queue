@@ -47,7 +47,7 @@ errors if the file does not exist yet; the exit status of a command is ignored.
 - `$L phase_start P0`
 - Read `RUN_ID` from the manifest. Run `git switch -c bench/<RUN_ID> bench-base-v1` in `REPO`,
   then `mkdir -p ~/eq-wt/<RUN_ID>`.
-- Record `cargo --version`, `rustc --version`, `which fish`, and `git rev-parse HEAD`
+- Record `cargo --version`, `rustc --version`, `which fish`, `gh auth status`, and `git rev-parse HEAD`
   with `$L note P0 msg=...`.
 - `cargo build` must succeed. Then `$L phase_end P0`.
 - Every later phase starts with `$L phase_start <P>` and ends with `$L phase_end <P>`
@@ -219,6 +219,9 @@ only the lenses that had findings. At most 2 fix cycles; anything left goes into
       into `.bench/<RUN_ID>/`. Write `.bench/<RUN_ID>/RUN_REPORT.md`: three paragraphs on
       what happened (the phases that went badly, escalations and drops, notable decisions),
       followed by the contents of `report.md`. Commit as `P8: run report and ledger`.
-- [ ] `git push -u origin bench/<RUN_ID>`, then
+- [ ] `git push -u origin bench/<RUN_ID>`. Then, if `gh auth status` succeeds, run
       `gh pr create --base main --title "[bench <RUN_ID>] hexagonal refactor + queue features" --body-file .bench/<RUN_ID>/RUN_REPORT.md`.
+      If gh is not authenticated, do not try to log in. Instead, `$L note P8
+      msg="pr-manual"` and finish with the compare URL
+      `https://github.com/BJSummerfield/encode_queue/compare/main...bench/<RUN_ID>`.
 - [ ] Do **not** merge. Remove any remaining worktrees under `~/eq-wt/<RUN_ID>`. Stop.

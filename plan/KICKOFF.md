@@ -25,6 +25,7 @@ Never look at other git branches, remotes, PRs, or other directories on this mac
 if you suspect the work already exists somewhere, and make every child obey the same rule.
 
 You are done when every item of the P8 checklist in `plan/TASKS.md` is ticked and the PR
-for your run branch is open against `main`. Do not merge it.
+for your run branch is open against `main` (or, if gh is not logged in, the branch is
+pushed and the compare URL is recorded). Do not merge anything.
 
 Start with P0 now.

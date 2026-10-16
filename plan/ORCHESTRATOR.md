@@ -38,7 +38,8 @@ anyone else. You and every child you launch must obey all of these:
   `git reflog`, `git stash list`, or `git fetch`. Never check out, diff, show, or log any
   other ref.
 - Never use `gh` or the GitHub website to read other branches, PRs, issues, or forks. The
-  only `gh` call allowed in the whole run is the final `gh pr create` in P8.
+  only `gh` calls allowed in the whole run are `gh auth status` in P0 and P8 and
+  `gh pr create` in P8.
 - Read nothing outside `REPO`, `WT_ROOT`, and this run's `BENCH_DIR`. In particular, do
   not read other directories under `~/encode_queue_bench/`, `~/eq-runs/`, `~/eq-wt/`,
   `~/projects/`, or `~/.pi/` (past sessions).

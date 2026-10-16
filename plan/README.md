@@ -138,8 +138,11 @@ Preflight:
 ### 4. Kick off
 
 ```sh
-cd ~/eq-runs/<run-id> && pi
+cd ~/eq-runs/<run-id> && nix develop -c pi
 ```
+
+`nix develop` puts the pinned toolchain from `flake.lock` (cargo, clippy, rustfmt, fish, gh)
+on PATH for pi and every child it spawns. This container has no Rust otherwise.
 
 Accept project trust when pi asks; without it the bench agents don't load. Optionally
 check that `bench-worker` and `bench-reviewer` appear in `subagent({ action: "list" })`.

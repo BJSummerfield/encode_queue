@@ -30,7 +30,8 @@ git -C "$clone" remote set-branches origin main
 extra=$(git -C "$clone" for-each-ref --format='%(refname)' \
   | grep -v -x -E 'refs/heads/main|refs/remotes/origin/main|refs/remotes/origin/HEAD|refs/tags/bench-base-v1' || true)
 [[ -z "$extra" ]] || { echo "unexpected refs in clone: $extra" >&2; exit 1; }
-(cd "$clone" && cargo build -q)
+(cd "$clone" && nix develop -c cargo build -q) || { echo "cargo build failed in nix dev shell" >&2; exit 1; }
+rustc_v=$(cd "$clone" && nix develop -c rustc --version)
 
 mkdir -p "$dir"/{reviews,research/raw,scratch}
 ln -sfn "$dir" "$BENCH_ROOT/current"
@@ -38,7 +39,7 @@ ln -sfn "$dir" "$BENCH_ROOT/current"
 
 jq -n --arg run_id "$run_id" --arg base "$(git -C "$clone" rev-parse bench-base-v1^{commit})" \
   --arg clone "$clone" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg host "$(hostname)" \
-  --arg rustc "$(rustc --version)" --arg pi "$(pi --version 2>/dev/null || echo unknown)" \
+  --arg rustc "$rustc_v" --arg pi "$(pi --version 2>/dev/null || echo unknown)" \
   --argjson stale "$([[ "${ALLOW_STALE_LOG:-}" == 1 ]] && echo true || echo false)" \
   --argjson server "$(jq '.config' <<<"$summary")" \
   '{run_id: $run_id, base_sha: $base, repo: $clone, preflight_at: $at, host: $host, rustc: $rustc,
@@ -47,4 +48,4 @@ jq -n --arg run_id "$run_id" --arg base "$(git -C "$clone" rev-parse bench-base-
 
 BENCH_DIR="$dir" "$(dirname "$0")/ledger.sh" preflight
 jq -r '"ready: \(.run_id)  spec=\(.server.speculative)  kv=\(.server.argv | index("--kv-dtype") as $i | if $i then .[$i+1] else "default" end)"' "$dir/manifest.json"
-echo "next: start plan/scripts/sample_server.sh in another pane, then:  cd $clone && pi"
+echo "next: start $clone/plan/scripts/sample_server.sh in another pane, then:  cd $clone && nix develop -c pi"
