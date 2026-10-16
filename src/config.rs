@@ -43,11 +43,11 @@ impl Config {
         let home = home.and_then(OsStr::to_str).ok_or(ConfigError::HomeUnset)?;
         let queue_path =
             QueuePath::new(PathBuf::from(home).join(".config/encode_queue/commands.txt"));
-        // The `nvim` default is applied here (not in `Editor::new`, which is
-        // frozen to the verbatim WP01 scaffold); WP10 may dedupe the literal.
+        // `Editor::new` applies the `nvim` default internally (`None` or
+        // empty → `nvim`); `config.rs` passes `None` in the empty/unset arm.
         let editor = match editor {
-            Some(name) if !name.is_empty() => Editor::new(name),
-            _ => Editor::new("nvim"),
+            Some(name) if !name.is_empty() => Editor::new(Some(name)),
+            _ => Editor::new(None),
         };
         Ok(Self { queue_path, editor })
     }
