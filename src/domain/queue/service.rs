@@ -1,17 +1,17 @@
 //! Application/service layer for the queue.
 //!
-//! WP08: `QueueService` is generic over its three injected ports
-//! (`R: QueueStore`, `C: CommandRunner`, `E: EditorLauncher`) and exposes
-//! `add`/`ls`/`start`/`edit`. Every method takes and returns only domain
-//! newtypes and the [`QueueError`] enum (ARCH-04): no `&str`/`String`
-//! parameters, and the module imports only `crate::domain` and `crate::ports`
-//! (ARCH-01).
-//! `QueueError` composes the four boundary enums via `#[from]` and never
+//! WP08: `QueueService` is generic over its four injected ports
+//! (`R: QueueStore`, `C: CommandRunner`, `E: EditorLauncher`,
+//! `L: QueueLock`) and exposes `add`/`ls`/`start`/`edit`. Every method
+//! takes and returns only domain newtypes and the [`QueueError`] enum
+//! (ARCH-04): no `&str`/`String` parameters, and the module imports only
+//! `crate::domain` and `crate::ports` (ARCH-01).
+//! `QueueError` composes the five boundary enums via `#[from]` and never
 //! duplicates their variants (ERR-02).
 //!
-//! A third port generic (`E: EditorLauncher`) beyond the `QueueService<R, C>`
-//! shorthand is intentional: it lets all three ports be injected with mocks
-//! (TST-01), which the two-generic form cannot express.
+//! A fourth port generic (`L: QueueLock`) beyond the `QueueService<R, C>`
+//! shorthand is intentional: it lets all four ports be injected with mocks
+//! (TST-01), which the three-generic form cannot express.
 //!
 //! `start` preserves the legacy `process_queue` flow — trim-before-run,
 //! unconditional removal of the first line (blank lines are removed, not
@@ -31,34 +31,37 @@ use crate::domain::failure::FailureRecord;
 use crate::domain::queue::{QueueEntry, QueueEntryError, QueuePath};
 use crate::ports::command_runner::{CommandRunner, RunError};
 use crate::ports::editor::{EditorError, EditorLauncher};
+use crate::ports::queue_lock::{LockError, QueueLock};
 use crate::ports::queue_store::{QueueStore, QueueStoreError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// The queue service, generic over its three injected ports.
+/// The queue service, generic over its four injected ports.
 ///
-/// A third port generic (`E: EditorLauncher`) beyond the `QueueService<R, C>`
-/// shorthand is required so that all three ports can be injected with mocks
+/// A fourth port generic (`L: QueueLock`) beyond the `QueueService<R, C>`
+/// shorthand is required so that all four ports can be injected with mocks
 /// (TST-01). The queue `QueuePath` is deliberately NOT a field here: `Config`
 /// remains the single origin of that path (V-ARCH-05), so the service depends
 /// only on the ports (ARCH-01).
 #[derive(Debug, Clone)]
-pub struct QueueService<R, C, E>
+pub struct QueueService<R, C, E, L>
 where
     R: QueueStore,
     C: CommandRunner,
     E: EditorLauncher,
+    L: QueueLock,
 {
     store: R,
     runner: C,
     editor: E,
+    lock: L,
 }
 
 /// Errors surfaced by the queue service.
 ///
-/// Composes the four boundary enums via `#[from]` and never duplicates their
+/// Composes the five boundary enums via `#[from]` and never duplicates their
 /// variants (ERR-02): `Store` for queue-file I/O, `Run` for command execution,
-/// `Editor` for editor launch, and `Invalid` for a line rejected by the
-/// domain's `QueueEntry` constructor.
+/// `Editor` for editor launch, `Lock` for the start lock (P6.F4), and
+/// `Invalid` for a line rejected by the domain's `QueueEntry` constructor.
 #[derive(Debug, thiserror::Error)]
 pub enum QueueError {
     /// The queue store (file I/O boundary) failed.
@@ -80,20 +83,25 @@ pub enum QueueError {
     /// `--stop-on-error` was set and a command failed.
     #[error("stopped after a failed command (--stop-on-error)")]
     StoppedOnFailure,
+    /// The start lock could not be acquired or released.
+    #[error(transparent)]
+    Lock(#[from] LockError),
 }
 
-impl<R, C, E> QueueService<R, C, E>
+impl<R, C, E, L> QueueService<R, C, E, L>
 where
     R: QueueStore,
     C: CommandRunner,
     E: EditorLauncher,
+    L: QueueLock,
 {
-    /// Wire the three ports into a service.
-    pub fn new(store: R, runner: C, editor: E) -> Self {
+    /// Wire the four ports into a service.
+    pub fn new(store: R, runner: C, editor: E, lock: L) -> Self {
         Self {
             store,
             runner,
             editor,
+            lock,
         }
     }
 
@@ -118,7 +126,29 @@ where
         }
     }
 
-    /// Run the queued entries, one per iteration, until the queue is empty.
+    /// Run the queued entries until the queue is empty.
+    ///
+    /// P6.F4: the start lock guards the whole drain — it is acquired before
+    /// the first read, and the release runs on every path. A release failure
+    /// after a successful drain surfaces as `QueueError::Lock`; when the
+    /// drain itself failed, the drain error wins (the release error is
+    /// discarded). A held lock is surfaced as
+    /// `QueueError::Lock(LockError::HeldBy(pid))` before any store access.
+    pub fn start(&self, stop_on_error: bool) -> Result<(), QueueError> {
+        self.lock.acquire()?;
+        let result = self.drain(stop_on_error);
+        let release = self.lock.release();
+        match (result, release) {
+            (Ok(()), Ok(())) => Ok(()),
+            // The drain error wins.
+            (Err(e), _) => Err(e),
+            // Failed to release after a successful drain.
+            (Ok(()), Err(e)) => Err(e.into()),
+        }
+    }
+
+    /// The `start` drain loop: run the queued entries, one per iteration,
+    /// until the queue is empty.
     ///
     /// Each iteration reads the whole queue (a missing file surfaces as
     /// `QueueError::Store`), breaks on an empty queue without rewriting, trims
@@ -138,7 +168,7 @@ where
     /// and the exit status. Spawn/other runner failures are never logged:
     /// the command never ran, so the entry stays queued and the error
     /// propagates unchanged (exit 1 at the boundary).
-    pub fn start(&self, stop_on_error: bool) -> Result<(), QueueError> {
+    fn drain(&self, stop_on_error: bool) -> Result<(), QueueError> {
         loop {
             // Fresh read each iteration: the queue "may have been edited"
             // between iterations.
@@ -333,6 +363,37 @@ mod tests {
         }
     }
 
+    /// `QueueLock` mock (P6.F4): records `acquire`/`release` call counts and
+    /// returns the one-shot scripted `acquire_err`/`release_err` (consumed on
+    /// the next matching call). Purely in-memory.
+    struct MockLock {
+        acquire_calls: Mutex<u64>,
+        release_calls: Mutex<u64>,
+        acquire_err: Mutex<Option<LockError>>,
+        release_err: Mutex<Option<LockError>>,
+    }
+
+    impl QueueLock for MockLock {
+        fn acquire(&self) -> Result<(), LockError> {
+            *self.acquire_calls.lock().unwrap() += 1;
+            self.acquire_err.lock().unwrap().take().map_or(Ok(()), Err)
+        }
+
+        fn release(&self) -> Result<(), LockError> {
+            *self.release_calls.lock().unwrap() += 1;
+            self.release_err.lock().unwrap().take().map_or(Ok(()), Err)
+        }
+    }
+
+    fn mock_lock() -> MockLock {
+        MockLock {
+            acquire_calls: Mutex::new(0),
+            release_calls: Mutex::new(0),
+            acquire_err: Mutex::new(None),
+            release_err: Mutex::new(None),
+        }
+    }
+
     fn entry(line: &str) -> QueueEntry {
         QueueEntry::new(line).unwrap()
     }
@@ -366,6 +427,7 @@ mod tests {
                 opened: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
             },
+            mock_lock(),
         );
 
         service.add(&entry("nix build .")).unwrap();
@@ -395,6 +457,7 @@ mod tests {
                 opened: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
             },
+            mock_lock(),
         );
 
         let lines: Vec<String> = service
@@ -430,6 +493,7 @@ mod tests {
                 opened: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
             },
+            mock_lock(),
         );
 
         service.start(false).unwrap();
@@ -459,6 +523,7 @@ mod tests {
                 opened: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
             },
+            mock_lock(),
         );
 
         service.start(false).unwrap();
@@ -491,6 +556,7 @@ mod tests {
                 opened: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
             },
+            mock_lock(),
         );
 
         service.start(false).unwrap();
@@ -520,6 +586,7 @@ mod tests {
                 opened: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
             },
+            mock_lock(),
         );
 
         service.start(false).unwrap();
@@ -558,6 +625,7 @@ mod tests {
                 opened: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
             },
+            mock_lock(),
         );
 
         assert!(matches!(service.start(false), Ok(())));
@@ -619,6 +687,7 @@ mod tests {
                 opened: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
             },
+            mock_lock(),
         );
 
         let err = service.start(true).unwrap_err();
@@ -667,6 +736,7 @@ mod tests {
                 opened: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
             },
+            mock_lock(),
         );
 
         let err = service.start(false).unwrap_err();
@@ -705,6 +775,7 @@ mod tests {
                 opened: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
             },
+            mock_lock(),
         );
 
         assert!(matches!(service.start(false), Ok(())));
@@ -738,6 +809,7 @@ mod tests {
                 opened: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
             },
+            mock_lock(),
         );
 
         let err = service.start(false).unwrap_err();
@@ -776,6 +848,7 @@ mod tests {
                 opened: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
             },
+            mock_lock(),
         );
 
         let err = service.start(false).unwrap_err();
@@ -786,6 +859,142 @@ mod tests {
 
         // The read failed before any run: no run call was made.
         assert!(service.runner.ran.lock().unwrap().is_empty());
+    }
+
+    /// P6.F4: a held lock (`HeldBy(7)`) refuses `start` before any store
+    /// access — the scripted one-shot `read_err` would surface as a
+    /// `Store` error if `read_all` were ever called, and the drain error
+    /// wins over the release in `start`, so the returned `Lock` error
+    /// proves `read_all` never ran. The release is not attempted.
+    #[test]
+    fn start_acquire_held_by_returns_lock_error_without_touching_the_store() {
+        let store = MockStore {
+            entries: Mutex::new(vec![entry("cmd")]),
+            read_err: Mutex::new(Some(QueueStoreError::Io(std::io::Error::other(
+                "read must not be attempted",
+            )))),
+            drop_err: Mutex::new(None),
+            failures: Mutex::new(Vec::new()),
+            drop_calls: Mutex::new(0),
+        };
+        let lock = MockLock {
+            acquire_calls: Mutex::new(0),
+            release_calls: Mutex::new(0),
+            acquire_err: Mutex::new(Some(LockError::HeldBy(7))),
+            release_err: Mutex::new(None),
+        };
+        let service = QueueService::new(
+            store,
+            MockRunner {
+                ran: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+                scripted: Mutex::new(Vec::new()),
+            },
+            MockEditor {
+                opened: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+            lock,
+        );
+
+        let err = service.start(false).unwrap_err();
+        assert!(matches!(err, QueueError::Lock(LockError::HeldBy(7))));
+
+        assert_eq!(*service.lock.acquire_calls.lock().unwrap(), 1);
+        // Release is not attempted after a failed acquire.
+        assert_eq!(*service.lock.release_calls.lock().unwrap(), 0);
+    }
+
+    /// P6.F4: a drain error returns the drain error and the release is
+    /// still called exactly once.
+    #[test]
+    fn start_drain_error_still_releases_the_lock_once() {
+        let store = MockStore {
+            entries: Mutex::new(vec![entry("cmd")]),
+            read_err: Mutex::new(Some(QueueStoreError::QueueFileMissing(PathBuf::from(
+                "/tmp/mock-home/queue/commands.txt",
+            )))),
+            drop_err: Mutex::new(None),
+            failures: Mutex::new(Vec::new()),
+            drop_calls: Mutex::new(0),
+        };
+        let lock = mock_lock();
+        let service = QueueService::new(
+            store,
+            MockRunner {
+                ran: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+                scripted: Mutex::new(Vec::new()),
+            },
+            MockEditor {
+                opened: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+            lock,
+        );
+
+        let err = service.start(false).unwrap_err();
+        assert!(matches!(
+            err,
+            QueueError::Store(QueueStoreError::QueueFileMissing(_))
+        ));
+
+        assert_eq!(*service.lock.acquire_calls.lock().unwrap(), 1);
+        assert_eq!(*service.lock.release_calls.lock().unwrap(), 1);
+    }
+
+    /// P6.F4: a successful drain releases the lock exactly once.
+    #[test]
+    fn start_success_releases_the_lock_once() {
+        let service = make_service(vec![entry("a"), entry("b")]);
+
+        assert!(matches!(service.start(false), Ok(())));
+
+        assert_eq!(*service.lock.acquire_calls.lock().unwrap(), 1);
+        assert_eq!(*service.lock.release_calls.lock().unwrap(), 1);
+        assert!(service.ls().unwrap().is_empty());
+    }
+
+    /// P6.F4: a release failure after a successful drain surfaces as
+    /// `QueueError::Lock(LockError::Io(_))`; the drain itself completed.
+    #[test]
+    fn start_release_failure_after_success_is_lock_error() {
+        let store = MockStore {
+            entries: Mutex::new(vec![entry("a")]),
+            read_err: Mutex::new(None),
+            drop_err: Mutex::new(None),
+            failures: Mutex::new(Vec::new()),
+            drop_calls: Mutex::new(0),
+        };
+        let lock = MockLock {
+            acquire_calls: Mutex::new(0),
+            release_calls: Mutex::new(0),
+            acquire_err: Mutex::new(None),
+            release_err: Mutex::new(Some(LockError::Io(std::io::Error::other(
+                "could not remove the lock",
+            )))),
+        };
+        let service = QueueService::new(
+            store,
+            MockRunner {
+                ran: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+                scripted: Mutex::new(Vec::new()),
+            },
+            MockEditor {
+                opened: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+            lock,
+        );
+
+        let err = service.start(false).unwrap_err();
+        assert!(matches!(err, QueueError::Lock(LockError::Io(_))));
+
+        // The drain completed before the release failed: the queue is
+        // drained.
+        assert!(service.ls().unwrap().is_empty());
+        assert_eq!(*service.lock.release_calls.lock().unwrap(), 1);
     }
 
     #[test]
@@ -809,6 +1018,7 @@ mod tests {
                 scripted: Mutex::new(Vec::new()),
             },
             editor,
+            mock_lock(),
         );
 
         let at = QueuePath::new(PathBuf::from("/tmp/mock-home/queue/commands.txt"));
@@ -843,6 +1053,7 @@ mod tests {
                 scripted: Mutex::new(Vec::new()),
             },
             editor,
+            mock_lock(),
         );
 
         let at = QueuePath::new(PathBuf::from("/tmp/mock-home/queue/commands.txt"));
@@ -875,6 +1086,7 @@ mod tests {
                 opened: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
             },
+            mock_lock(),
         );
 
         assert_eq!(service.ls().unwrap(), Vec::<QueueEntry>::new());
@@ -904,13 +1116,16 @@ mod tests {
                 opened: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
             },
+            mock_lock(),
         );
 
         let err = service.ls().unwrap_err();
         assert!(matches!(err, QueueError::Store(QueueStoreError::Io(_))));
     }
 
-    fn make_service(entries: Vec<QueueEntry>) -> QueueService<MockStore, MockRunner, MockEditor> {
+    fn make_service(
+        entries: Vec<QueueEntry>,
+    ) -> QueueService<MockStore, MockRunner, MockEditor, MockLock> {
         QueueService::new(
             MockStore {
                 entries: Mutex::new(entries),
@@ -928,6 +1143,7 @@ mod tests {
                 opened: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
             },
+            mock_lock(),
         )
     }
 
@@ -1024,6 +1240,7 @@ mod tests {
                 opened: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
             },
+            mock_lock(),
         );
 
         let err = service.remove_entry(1).unwrap_err();
@@ -1056,5 +1273,9 @@ mod tests {
             invalid,
             QueueError::Invalid(QueueEntryError::Empty)
         ));
+
+        // Lock boundary (P6.F4).
+        let lock: QueueError = LockError::HeldBy(7).into();
+        assert!(matches!(lock, QueueError::Lock(LockError::HeldBy(7))));
     }
 }

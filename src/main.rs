@@ -22,6 +22,7 @@ use crate::config::{Config, ConfigError};
 use crate::domain::queue::service::QueueService;
 use crate::inbound::cli::{Cli, CliError};
 use crate::outbound::editor::EditorProcess;
+use crate::outbound::lock::FileQueueLock;
 use crate::outbound::queue_file::FileQueueStore;
 use crate::outbound::shell::ShellRunner;
 
@@ -51,10 +52,13 @@ fn main() -> ExitCode {
         }
     }
 
+    // `QueuePath` is not `Copy` (TY-06: `PathBuf` wrapper), so the lock
+    // takes a clone, exactly like the store (P6.F4).
     let service = QueueService::new(
         FileQueueStore::new(config.queue_path().clone()),
         ShellRunner::from(*config.shell()),
         EditorProcess::new(config.editor().clone()),
+        FileQueueLock::new(config.queue_path().clone()),
     );
     let cli = Cli::new(service, config.queue_path().clone());
 
@@ -67,6 +71,12 @@ fn main() -> ExitCode {
         Err(CliError::MissingArgument(arg)) => {
             eprintln!("error: missing required argument: {arg}");
             ExitCode::from(2)
+        }
+        // P6.F4: another live process holds the start lock: a distinct,
+        // non-failure exit code (3). Placed BEFORE the `Service` catch-all.
+        Err(CliError::Locked { pid }) => {
+            eprintln!("error: queue already running (pid {pid})");
+            ExitCode::from(3)
         }
         Err(e) => {
             eprintln!("error: {e}");
