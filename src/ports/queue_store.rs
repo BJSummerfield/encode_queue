@@ -1,16 +1,26 @@
 //! `QueueStore` port: read, append, and rewrite the queue file.
 //!
-//! Scaffold (WP01): the trait signature is final; `QueueStoreError` is a
-//! `thiserror` skeleton (full variant set in WP03). The store owns its
-//! `QueuePath`, so no raw path crosses the port (ARCH-03).
+//! The trait signature is final: it takes only domain newtypes and returns
+//! only `QueueStoreError` (ARCH-03). The store owns its `QueuePath`, so no
+//! raw path crosses the port.
+
+use std::path::PathBuf;
 
 use crate::domain::queue::QueueEntry;
 
 /// Errors surfaced at the queue-store boundary.
 ///
-/// Skeleton; the concrete variants (`QueueFileMissing`, `Io`) land in WP03.
+/// One enum beside the port (ERR-02); every expected failure is a named
+/// variant with an owned payload plus the `Io` catch-all (ERR-04, GEN-03).
 #[derive(Debug, thiserror::Error)]
-pub enum QueueStoreError {}
+pub enum QueueStoreError {
+    /// The queue file does not exist.
+    #[error("queue file not found at {0}")]
+    QueueFileMissing(PathBuf),
+    /// Any other file I/O failure the adapter could not classify.
+    #[error("queue file I/O failed: {0}")]
+    Io(#[source] std::io::Error),
+}
 
 /// A store of queue entries, owned by the queue file in `outbound/`.
 pub trait QueueStore {
@@ -22,4 +32,22 @@ pub trait QueueStore {
 
     /// Remove the first entry and rewrite the queue without it.
     fn drop_first(&self) -> Result<(), QueueStoreError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::QueueStoreError;
+    use std::path::PathBuf;
+
+    #[test]
+    fn variants_carry_owned_payloads() {
+        assert!(matches!(
+            QueueStoreError::QueueFileMissing(PathBuf::from("/tmp/commands.txt")),
+            QueueStoreError::QueueFileMissing(_)
+        ));
+        assert!(matches!(
+            QueueStoreError::Io(std::io::Error::other("test I/O failure")),
+            QueueStoreError::Io(_)
+        ));
+    }
 }
