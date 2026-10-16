@@ -60,36 +60,51 @@ errors if the file does not exist yet; the exit status of a command is ignored.
 Every later phase starts with `$L phase_start <P>` and ends with `$L phase_end <P>`
 once all of its tasks, including fixes, are merged or dropped. Phases never overlap.
 
-## P1 — Research: scrape the guides (fan-out ×4)
+## P1 — Research: pull the guides' source markdown (fan-out ×4)
 
-| ID | URL |
-|----|-----|
-| P1.R1 | https://www.howtocodeit.com/guides/the-definitive-guide-to-rust-error-handling |
-| P1.R2 | https://www.howtocodeit.com/guides/master-hexagonal-architecture-in-rust |
-| P1.R3 | https://www.howtocodeit.com/guides/ultimate-guide-rust-newtypes |
-| P1.R4 | https://www.howtocodeit.com/guides/writing-production-rust-macros-with-macro-rules |
+The guides' source is published as markdown in `github.com/howtocodeit/article-md`. Every
+run reads it at the same pinned commit, so all runs get byte-identical input.
+`SRC = https://raw.githubusercontent.com/howtocodeit/article-md/b166e26aac8feeff87afa4b6268a4fcf18b90622/guides`
 
-Worker spec (same for each; `<slug>` is the last path segment):
+| ID | `<slug>` | Source file | Article URL (for attribution) | Code blocks | sha256 (first 12) |
+|----|---------|-------------|-------------------------------|-------------|-------------------|
+| P1.R1 | `error-handling` | `$SRC/the-definitive-guide-to-error-handling-in-rust.md` | https://www.howtocodeit.com/guides/the-definitive-guide-to-rust-error-handling | 23 | `9cae1a8243c4` |
+| P1.R2 | `hexagonal-architecture` | `$SRC/master-hexagonal-architecture-in-rust.md` | https://www.howtocodeit.com/guides/master-hexagonal-architecture-in-rust | 29 | `c2a76a836078` |
+| P1.R3 | `newtypes` | `$SRC/the-ultimate-guide-to-rust-newtypes.md` | https://www.howtocodeit.com/guides/ultimate-guide-rust-newtypes | 31 | `e0862cad1d42` |
+| P1.R4 | `macro-rules` | `$SRC/writing-production-rust-macros-with-macro_rules.md` | https://www.howtocodeit.com/guides/writing-production-rust-macros-with-macro-rules | 27 | `1eb369476fb9` |
 
-1. **Scrape the page itself. Do not use a summarizing fetch or search tool.** Run
-   `curl -sL -A "Mozilla/5.0" <URL> -o $BENCH_DIR/research/raw/<slug>.html`. Raw HTML stays
-   out of the repo. Record `sha256sum` of the file in
-   `docs/research/<slug>/SOURCE.md`, together with the URL and fetch time.
-2. Extract **every** `<pre>` code block verbatim into `docs/research/<slug>/snippets.md`.
-   Number them `S1..Sn` in page order. Decode HTML entities and strip syntax-highlighting
-   tags. Put the nearest preceding `<h2>`/`<h3>` heading above each block. State `n` at
-   the top. Write any extraction script you need in `$BENCH_DIR/scratch/`, not in the
-   repo.
-3. Write `docs/research/<slug>/notes.md` with the prescriptive rules the article teaches.
-   Each rule gets a short statement, the article's reasoning, and at least one citation of
-   a snippet ID. Also list the anti-patterns the article warns against.
+Worker spec (same for each):
+
+1. **Download the raw markdown with `curl`, and read the whole file yourself.** Do not use
+   a web-search, fetch, or summarizing tool, and do not fetch anything else from GitHub or
+   the website. Run
+   `curl -sfL <source file URL> -o $BENCH_DIR/research/raw/<slug>.md`.
+   Check its `sha256sum` against the table, and stop with status `blocked` if it differs.
+   Write `docs/research/<slug>/SOURCE.md` with the source URL, the article URL, the full
+   sha256, and the fetch time. The raw file stays out of the repo.
+2. Extract **every** fenced code block (```` ``` ```` … ```` ``` ````) verbatim into
+   `docs/research/<slug>/snippets.md`. Number them `S1..Sn` in file order, and state `n` at
+   the top. Above each block, put the nearest preceding `#`/`##`/`###` heading, the
+   fence's info string (including any `path=...` attribute), and the attribution line
+   `Source: <article URL>`. The license requires that link next to every copied example.
+   Write any extraction script in `$BENCH_DIR/scratch/`, not in the repo.
+3. Write `docs/research/<slug>/notes.md`: the prescriptive rules the article teaches,
+   **derived from the code and the surrounding prose**. Each rule gets a short statement in
+   your own words, the article's reasoning, and at least one snippet ID that demonstrates it.
+   Also list the anti-patterns the article warns against, with the snippet that shows each
+   one where there is one. Quote at most 100 words of prose at a time, always with the article
+   link (license terms). Put the article link at the top of the file.
 
 Reviewer must:
-- Independently count `<pre` in the raw HTML and confirm it equals `n`.
-- Pick 5 random snippets and diff them against the raw HTML after decoding them
-  independently.
-- Confirm every rule cites an existing snippet ID that actually supports the rule, and that
-  no rule invents crates or APIs that are not in the article.
+- Download the source file independently and confirm its sha256 matches the table.
+- Independently count the fenced blocks in the raw markdown, and confirm the count equals
+  both `n` and the table.
+- Pick 5 random snippets and diff each one byte-for-byte against the raw markdown.
+- Confirm every snippet has the attribution line, and no prose quote exceeds 100 words.
+- Confirm every rule cites an existing snippet ID that actually supports it, and that no
+  rule invents crates, APIs, or advice that are not in the article.
+- Name at least two prescriptive points from the article that the notes missed, or state
+  that you searched for them and found none.
 
 ## P2 — Conventions synthesis (fan-in ×1), depends on P1.*
 

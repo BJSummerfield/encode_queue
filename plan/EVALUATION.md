@@ -75,7 +75,7 @@ Do not look at the mapping until every row is scored. Score each item 0–5 and 
    `ENCODE_QUEUE_DIR`.
 3. **Feature spec compliance** for F1–F4. Check every stated exit code, message, and file
    format with your own black-box checks, not the run's tests.
-4. **Research fidelity**: snippet counts match the raw pages, and rules are supported by
+4. **Research fidelity**: snippet counts match the pinned markdown (23/29/31/27), snippets are verbatim, and rules are supported by
    their cited snippets.
 5. **CONVENTIONS.md quality**: owner preferences encoded, checkable rules, conflicts
    resolved.
@@ -94,8 +94,8 @@ Do not look at the mapping until every row is scored. Score each item 0–5 and 
 - **Structural drift**: compare `docs/CONVENTIONS.md`, `docs/refactor/PLAN.md` (WP count
   and shape), and the final `src/` layout across the four runs. Did the same config
   converge on the same design?
-- Manifest differences beyond spec and KV dtype; source page hash differences between
-  runs (`docs/research/*/SOURCE.md`); tile gaps (collector downtime); server uptime at preflight.
+- Manifest differences beyond spec and KV dtype; any `docs/research/*/SOURCE.md` sha256 that differs from the pinned
+  values in TASKS.md (it should never differ); tile gaps (collector downtime); server uptime at preflight.
 
 ## Output
 

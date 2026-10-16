@@ -84,8 +84,8 @@ back from preflight to the end of the run. The logs on the server are never touc
 - Restart ninfer right before every run, so each run starts with an empty RAM tier and a
   cold prefix cache. Preflight refuses to start if ninfer has been up more than 2 hours.
 - No other inference load on the server during a run.
-- The research pages are scraped live. P1 records their sha256, so the judge can tell if
-  they changed between runs.
+- Research inputs are identical across runs: P1 downloads the guides' source markdown from
+  `howtocodeit/article-md` at a pinned commit, and checks each file's sha256.
 
 ## Isolation
 

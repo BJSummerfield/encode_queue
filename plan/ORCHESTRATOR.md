@@ -46,7 +46,9 @@ anyone else. You and every child you launch must obey all of these:
 - Read nothing outside `REPO`, `WT_ROOT`, and this run's `BENCH_DIR`. In particular, do
   not read other directories under `~/encode_queue_bench/`, `~/eq-runs/`, `~/eq-wt/`,
   `~/projects/`, or `~/.pi/` (past sessions).
-- The only web access allowed is the four P1 `curl` URLs.
+- The only network access allowed is the four pinned P1 source URLs, fetched with `curl`.
+  No other GitHub access: in particular, not the `howtocodeit/article-md` history or any
+  other `howtocodeit` repository (`hexarch` holds a complete solution).
 - Put the following paragraph verbatim at the top of every child prompt.
 
 > ISOLATION: Work only inside your worktree. Read git history only for your own branch
