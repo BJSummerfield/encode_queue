@@ -5,6 +5,8 @@
 //! `QueueEntryError` is a skeleton; its variant set and the strict constructor
 //! behaviour are finalized in WP02. No third-party imports here (ARCH-01).
 
+pub mod service;
+
 use std::fmt;
 use std::path::{Path, PathBuf};
 
