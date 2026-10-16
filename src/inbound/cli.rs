@@ -427,11 +427,17 @@ mod tests {
 
     #[test]
     fn cli_maps_store_error_to_service_variant() -> Result<(), TestError> {
+        // P6 (supervisor-approved test-only deviation): the one-shot store
+        // error is the `Io` catch-all rather than `QueueFileMissing`, because
+        // `ls` on a missing file now returns `Ok(empty)` (V-ARCH-05 behaviour
+        // half, covered by the WP08 service test). An `Io` error is still a
+        // legitimate `ls` failure, so the `CliError::Service` mapping stays
+        // exercised at CLI level.
         let cli = make_cli(
             MockStore {
                 entries: Mutex::new(Vec::new()),
-                read_err: Mutex::new(Some(QueueStoreError::QueueFileMissing(PathBuf::from(
-                    TEST_QUEUE_FILE,
+                read_err: Mutex::new(Some(QueueStoreError::Io(std::io::Error::other(
+                    "queue file unreadable",
                 )))),
                 drop_err: Mutex::new(None),
             },
@@ -446,9 +452,7 @@ mod tests {
         let err = cli.dispatch(&matches);
         assert!(matches!(
             err,
-            Err(CliError::Service(QueueError::Store(
-                QueueStoreError::QueueFileMissing(_)
-            )))
+            Err(CliError::Service(QueueError::Store(QueueStoreError::Io(_))))
         ));
         Ok(())
     }

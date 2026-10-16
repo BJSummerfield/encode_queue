@@ -88,8 +88,18 @@ where
     }
 
     /// List every entry in the queue, in order (blank lines verbatim).
+    ///
+    /// P6 (V-ARCH-05 behaviour half): a **missing** queue file is not an
+    /// error for `ls` — it is reported as an empty queue (`Ok(Vec::new())`),
+    /// while any other store error still propagates. `start` is deliberately
+    /// UNCHANGED: a missing queue still surfaces there as
+    /// `QueueError::Store(QueueStoreError::QueueFileMissing)`.
     pub fn ls(&self) -> Result<Vec<QueueEntry>, QueueError> {
-        Ok(self.store.read_all()?)
+        match self.store.read_all() {
+            Err(QueueStoreError::QueueFileMissing(_)) => Ok(Vec::new()),
+            Err(e) => Err(e.into()),
+            Ok(entries) => Ok(entries),
+        }
     }
 
     /// Run the queued entries, one per iteration, until the queue is empty.
@@ -501,8 +511,11 @@ mod tests {
         assert!(matches!(err, QueueError::Editor(EditorError::Spawn(_))));
     }
 
+    /// P6 (V-ARCH-05 behaviour half): `ls` on a **missing** queue file no
+    /// longer errors — it reports an empty queue. (The `start` missing-file
+    /// expectation is unchanged: see `start_propagates_store_error_without_running`.)
     #[test]
-    fn ls_propagates_store_error() {
+    fn ls_on_missing_file_returns_empty() {
         let store = MockStore {
             entries: Mutex::new(Vec::new()),
             read_err: Mutex::new(Some(QueueStoreError::QueueFileMissing(PathBuf::from(
@@ -522,11 +535,34 @@ mod tests {
             },
         );
 
+        assert_eq!(service.ls().unwrap(), Vec::<QueueEntry>::new());
+    }
+
+    /// Only the missing-file case is softened for `ls`; any other store
+    /// error still propagates as `QueueError::Store` (P6).
+    #[test]
+    fn ls_propagates_other_store_errors() {
+        let store = MockStore {
+            entries: Mutex::new(Vec::new()),
+            read_err: Mutex::new(Some(QueueStoreError::Io(std::io::Error::other(
+                "permission denied",
+            )))),
+            drop_err: Mutex::new(None),
+        };
+        let service = QueueService::new(
+            store,
+            MockRunner {
+                ran: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+            MockEditor {
+                opened: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+        );
+
         let err = service.ls().unwrap_err();
-        assert!(matches!(
-            err,
-            QueueError::Store(QueueStoreError::QueueFileMissing(_))
-        ));
+        assert!(matches!(err, QueueError::Store(QueueStoreError::Io(_))));
     }
 
     #[test]

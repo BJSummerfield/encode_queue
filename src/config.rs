@@ -1,11 +1,17 @@
-//! Environment configuration (`HOME`, `EDITOR`) → domain newtypes.
+//! Environment configuration (`HOME`, `EDITOR`, `ENCODE_QUEUE_DIR`) → domain
+//! newtypes.
 //!
 //! `Config` is the single origin of the queue `QueuePath` and the `Editor`
-//! (V-ARCH-05): it reads the environment, converts the raw `HOME`/`EDITOR`
-//! values into the domain newtypes at the boundary (V-TY-03), and reports a
-//! missing (or non-Unicode) `HOME` as `ConfigError::HomeUnset` — a `Result`
-//! error, never a panic (V-ERR-01). Declared in `main.rs` but not yet wired
-//! (WP10).
+//! (V-ARCH-05): it reads the environment, converts the raw `HOME`/`EDITOR`/
+//! `ENCODE_QUEUE_DIR` values into the domain newtypes at the boundary
+//! (V-TY-03), and reports a missing (or non-Unicode) `HOME` as
+//! `ConfigError::HomeUnset` — a `Result` error, never a panic (V-ERR-01).
+//! `ENCODE_QUEUE_DIR` (P6) optionally overrides the queue directory: the
+//! queue file is then `<ENCODE_QUEUE_DIR>/commands.txt` instead of the legacy
+//! `$HOME/.config/encode_queue/commands.txt`; an unset, empty, or
+//! whitespace-only value is treated as unset (mirroring the `Editor`
+//! empty→default convention), and a non-Unicode value is
+//! `ConfigError::QueueDirInvalid`.
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -20,29 +26,58 @@ pub struct Config {
 }
 
 impl Config {
-    /// Read `HOME` and `EDITOR` from the environment and convert them into
-    /// domain newtypes.
+    /// Read `HOME`, `EDITOR` and `ENCODE_QUEUE_DIR` from the environment and
+    /// convert them into domain newtypes.
     ///
-    /// `HOME` is required: a missing (or non-Unicode) `HOME` yields
-    /// `Err(ConfigError::HomeUnset)` rather than panicking. `EDITOR` defaults
-    /// to `nvim` when unset or empty.
+    /// `HOME` is required in all cases: a missing (or non-Unicode) `HOME`
+    /// yields `Err(ConfigError::HomeUnset)` rather than panicking — even when
+    /// `ENCODE_QUEUE_DIR` is set. `EDITOR` defaults to `nvim` when unset or
+    /// empty. `ENCODE_QUEUE_DIR` overrides the queue directory (see
+    /// [`Self::from_vars`]).
     pub fn from_env() -> Result<Self, ConfigError> {
         let home = std::env::var_os("HOME");
         let editor = std::env::var("EDITOR").ok();
-        Self::from_vars(home.as_deref(), editor.as_deref())
+        let queue_dir = std::env::var_os("ENCODE_QUEUE_DIR");
+        Self::from_vars(home.as_deref(), editor.as_deref(), queue_dir.as_deref())
     }
 
-    /// Convert raw `HOME`/`EDITOR` environment values into domain newtypes.
+    /// Convert raw `HOME`/`EDITOR`/`ENCODE_QUEUE_DIR` environment values into
+    /// domain newtypes.
     ///
     /// Pure with respect to process state — the env values are parameters,
     /// not read from the process environment — so it can be unit-tested
     /// deterministically without env mutation. A `None` or non-Unicode `home`
-    /// yields `Err(ConfigError::HomeUnset)`; a `None` or empty `editor`
+    /// yields `Err(ConfigError::HomeUnset)` in **all** cases (the override
+    /// does not relax the `HOME` requirement); a `None` or empty `editor`
     /// defaults to `nvim`.
-    pub fn from_vars(home: Option<&OsStr>, editor: Option<&str>) -> Result<Self, ConfigError> {
+    ///
+    /// `ENCODE_QUEUE_DIR` semantics (P6): a `Some` value that is non-empty
+    /// valid Unicode (and not whitespace-only) wins over `HOME` — the queue
+    /// file is `<queue_dir>/commands.txt`. An unset, empty, or whitespace-only
+    /// value is treated as unset (empty mirrors the `Editor` empty→default
+    /// convention) and the legacy `$HOME/.config/encode_queue/commands.txt`
+    /// path is used. A set value that is not valid Unicode yields
+    /// `Err(ConfigError::QueueDirInvalid)`.
+    pub fn from_vars(
+        home: Option<&OsStr>,
+        editor: Option<&str>,
+        queue_dir: Option<&OsStr>,
+    ) -> Result<Self, ConfigError> {
         let home = home.and_then(OsStr::to_str).ok_or(ConfigError::HomeUnset)?;
-        let queue_path =
-            QueuePath::new(PathBuf::from(home).join(".config/encode_queue/commands.txt"));
+        // `ENCODE_QUEUE_DIR`: empty/whitespace-only → treated as unset;
+        // non-Unicode → `QueueDirInvalid`; otherwise the override wins.
+        let override_dir = match queue_dir.and_then(OsStr::to_str) {
+            Some(dir) if !dir.trim().is_empty() => Some(dir),
+            Some(_) => None,
+            None => match queue_dir {
+                Some(dir) if !dir.is_empty() => return Err(ConfigError::QueueDirInvalid),
+                _ => None,
+            },
+        };
+        let queue_path = match override_dir {
+            Some(dir) => QueuePath::new(PathBuf::from(dir).join("commands.txt")),
+            None => QueuePath::new(PathBuf::from(home).join(".config/encode_queue/commands.txt")),
+        };
         // `Editor::new` applies the `nvim` default internally (`None` or
         // empty → `nvim`); `config.rs` passes `None` in the empty/unset arm.
         let editor = match editor {
@@ -70,6 +105,10 @@ pub enum ConfigError {
     /// be derived.
     #[error("HOME environment variable is not set")]
     HomeUnset,
+    /// `ENCODE_QUEUE_DIR` is set but is not valid Unicode, so it cannot be
+    /// used as the queue directory.
+    #[error("ENCODE_QUEUE_DIR is not valid Unicode")]
+    QueueDirInvalid,
 }
 
 #[cfg(test)]
@@ -91,11 +130,19 @@ mod tests {
     /// Fixed queue-file suffix (must match `Config::from_vars`).
     const QUEUE_FILE_SUFFIX: &str = ".config/encode_queue/commands.txt";
 
-    fn snapshot_env() -> (Option<String>, Option<String>) {
-        (std::env::var("HOME").ok(), std::env::var("EDITOR").ok())
+    /// Fixed queue file name under the `ENCODE_QUEUE_DIR` override
+    /// (must match `Config::from_vars`).
+    const OVERRIDE_QUEUE_FILE: &str = "commands.txt";
+
+    fn snapshot_env() -> (Option<String>, Option<String>, Option<String>) {
+        (
+            std::env::var("HOME").ok(),
+            std::env::var("EDITOR").ok(),
+            std::env::var("ENCODE_QUEUE_DIR").ok(),
+        )
     }
 
-    fn restore_env(home: Option<String>, editor: Option<String>) {
+    fn restore_env(home: Option<String>, editor: Option<String>, queue_dir: Option<String>) {
         match home {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
@@ -103,6 +150,10 @@ mod tests {
         match editor {
             Some(v) => std::env::set_var("EDITOR", v),
             None => std::env::remove_var("EDITOR"),
+        }
+        match queue_dir {
+            Some(v) => std::env::set_var("ENCODE_QUEUE_DIR", v),
+            None => std::env::remove_var("ENCODE_QUEUE_DIR"),
         }
     }
 
@@ -119,7 +170,7 @@ mod tests {
     /// A missing `HOME` is a `Result` error, not a panic (pure input).
     #[test]
     fn from_vars_home_unset_is_an_error() {
-        let result = Config::from_vars(None, None);
+        let result = Config::from_vars(None, None, None);
         assert!(
             matches!(result, Err(ConfigError::HomeUnset)),
             "expected ConfigError::HomeUnset, got {result:?}"
@@ -130,7 +181,7 @@ mod tests {
     #[test]
     fn from_vars_home_non_unicode_is_an_error() {
         let home: std::ffi::OsString = OsStringExt::from_vec(vec![0xff]);
-        let result = Config::from_vars(Some(home.as_os_str()), None);
+        let result = Config::from_vars(Some(home.as_os_str()), None, None);
         assert!(
             matches!(result, Err(ConfigError::HomeUnset)),
             "expected ConfigError::HomeUnset, got {result:?}"
@@ -144,20 +195,71 @@ mod tests {
         let home = std::ffi::OsStr::new("/tmp/fake-home");
         let expected_path = std::path::Path::new("/tmp/fake-home").join(QUEUE_FILE_SUFFIX);
 
-        let cfg = must_be_config(Config::from_vars(Some(home), None));
+        let cfg = must_be_config(Config::from_vars(Some(home), None, None));
         assert_eq!(cfg.queue_path().as_path(), expected_path);
         assert_eq!(cfg.editor().as_str(), "nvim");
 
-        let cfg = must_be_config(Config::from_vars(Some(home), Some("")));
+        let cfg = must_be_config(Config::from_vars(Some(home), Some(""), None));
         assert_eq!(cfg.queue_path().as_path(), expected_path);
         assert_eq!(cfg.editor().as_str(), "nvim");
+    }
+
+    /// A set, non-empty, non-whitespace `ENCODE_QUEUE_DIR` wins over `HOME`
+    /// (P6): the queue file is `<queue_dir>/commands.txt`.
+    #[test]
+    fn from_vars_queue_dir_override_wins_over_home() {
+        let home = std::ffi::OsStr::new("/tmp/fake-home");
+        let queue_dir = std::ffi::OsStr::new("/tmp/custom-queue");
+        let cfg = must_be_config(Config::from_vars(Some(home), None, Some(queue_dir)));
+        assert_eq!(
+            cfg.queue_path().as_path(),
+            std::path::Path::new("/tmp/custom-queue").join(OVERRIDE_QUEUE_FILE)
+        );
+    }
+
+    /// An empty or whitespace-only `ENCODE_QUEUE_DIR` is treated as unset:
+    /// the legacy `HOME`-based path is used.
+    #[test]
+    fn from_vars_empty_or_whitespace_queue_dir_falls_back_to_home() {
+        let home = std::ffi::OsStr::new("/tmp/fake-home");
+        let expected_path = std::path::Path::new("/tmp/fake-home").join(QUEUE_FILE_SUFFIX);
+
+        for queue_dir in [std::ffi::OsStr::new(""), std::ffi::OsStr::new("   ")] {
+            let cfg = must_be_config(Config::from_vars(Some(home), None, Some(queue_dir)));
+            assert_eq!(cfg.queue_path().as_path(), expected_path);
+        }
+    }
+
+    /// A non-Unicode `ENCODE_QUEUE_DIR` is a `Result` error, not a panic.
+    #[test]
+    fn from_vars_queue_dir_non_unicode_is_an_error() {
+        let home = std::ffi::OsStr::new("/tmp/fake-home");
+        let queue_dir: std::ffi::OsString = OsStringExt::from_vec(vec![0xff]);
+        let result = Config::from_vars(Some(home), None, Some(queue_dir.as_os_str()));
+        assert!(
+            matches!(result, Err(ConfigError::QueueDirInvalid)),
+            "expected ConfigError::QueueDirInvalid, got {result:?}"
+        );
+    }
+
+    /// `HOME` remains required even when the override is set: a missing
+    /// `HOME` is still `HomeUnset` (the override does not relax the `HOME`
+    /// requirement).
+    #[test]
+    fn from_vars_queue_dir_override_still_requires_home() {
+        let queue_dir = std::ffi::OsStr::new("/tmp/custom-queue");
+        let result = Config::from_vars(None, None, Some(queue_dir));
+        assert!(
+            matches!(result, Err(ConfigError::HomeUnset)),
+            "expected ConfigError::HomeUnset, got {result:?}"
+        );
     }
 
     /// A set, non-empty `EDITOR` is parsed into the `Editor` newtype verbatim.
     #[test]
     fn from_vars_uses_configured_editor() {
         let home = std::ffi::OsStr::new("/tmp/fake-home");
-        let cfg = must_be_config(Config::from_vars(Some(home), Some("vim")));
+        let cfg = must_be_config(Config::from_vars(Some(home), Some("vim"), None));
         assert_eq!(
             cfg.queue_path().as_path(),
             std::path::Path::new("/tmp/fake-home").join(QUEUE_FILE_SUFFIX)
@@ -165,17 +267,17 @@ mod tests {
         assert_eq!(cfg.editor().as_str(), "vim");
     }
 
-    /// `Config::from_env` reads `HOME`/`EDITOR` through the real
-    /// `env::var`/`env::var_os` path. The only env-mutating test: it takes
-    /// `ENV_LOCK` and restores both variables on exit.
+    /// `Config::from_env` reads `HOME`/`EDITOR`/`ENCODE_QUEUE_DIR` through
+    /// the real `env::var`/`env::var_os` path. The only env-mutating test:
+    /// it takes `ENV_LOCK` and restores all three variables on exit.
     #[test]
-    fn from_env_reads_home_and_editor_from_the_environment() {
+    fn from_env_reads_home_editor_and_queue_dir_from_the_environment() {
         let guard = match ENV_LOCK.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
 
-        let (home, editor) = snapshot_env();
+        let (home, editor, queue_dir) = snapshot_env();
 
         std::env::set_var("HOME", "/tmp/fake-home");
         std::env::set_var("EDITOR", "envtest-editor");
@@ -186,14 +288,22 @@ mod tests {
         );
         assert_eq!(cfg.editor().as_str(), "envtest-editor");
 
+        // `ENCODE_QUEUE_DIR` overrides the queue directory (P6).
+        std::env::set_var("ENCODE_QUEUE_DIR", "/tmp/envtest-queue");
+        let cfg = must_be_config(Config::from_env());
+        assert_eq!(
+            cfg.queue_path().as_path(),
+            std::path::Path::new("/tmp/envtest-queue").join(OVERRIDE_QUEUE_FILE)
+        );
+
         std::env::remove_var("HOME");
         let result = Config::from_env();
         assert!(
             matches!(result, Err(ConfigError::HomeUnset)),
-            "expected ConfigError::HomeUnset, got {result:?}"
+            "expected ConfigError::HomeUnset (still required with the override set), got {result:?}"
         );
 
-        restore_env(home, editor);
+        restore_env(home, editor, queue_dir);
         drop(guard);
     }
 }
