@@ -1,3 +1,6 @@
+//! `encode_queue` CLI bootstrap (ARCH-02): config → outbound adapters →
+//! service → inbound CLI → exit code (0 ok, 1 service/I-O, 2 usage, 3 lock
+//! held).
 #![cfg_attr(
     not(test),
     deny(
@@ -15,7 +18,6 @@ mod inbound;
 mod outbound;
 mod ports;
 
-use std::fs;
 use std::process::ExitCode;
 
 use crate::config::{Config, ConfigError};
@@ -29,7 +31,7 @@ use crate::outbound::shell::ShellRunner;
 fn main() -> ExitCode {
     let config = match Config::from_env() {
         Ok(config) => config,
-        // Usage-class error (P6.F2): an invalid shell-selection value is
+        // P6.F2: an invalid shell-selection value is a usage-class error
         // and exits with code 2, distinct from the generic config-error arm.
         Err(e) if matches!(e, ConfigError::ShellInvalid(_)) => {
             eprintln!("error: {e}");
@@ -41,21 +43,22 @@ fn main() -> ExitCode {
         }
     };
 
-    // Legacy bootstrap parity (behaviour contract): the queue directory is
-    // created before any subcommand dispatches, so `add` works on a fresh
-    // `$HOME` while a missing queue file still surfaces as
-    // `QueueFileMissing` for `ls`/`start`.
-    if let Some(queue_dir) = config.queue_path().as_path().parent() {
-        if let Err(e) = fs::create_dir_all(queue_dir) {
+    // P7.FIX03: the store owns the queue directory's creation (ARCH-02:
+    // `main` does no file I/O; ARCH-03: all file I/O in `outbound/`;
+    // behaviour contract: "dir created if missing" for every command).
+    // A mkdir failure still exits 1 before dispatch, as before.
+    let store = match FileQueueStore::new(config.queue_path().clone()) {
+        Ok(store) => store,
+        Err(e) => {
             eprintln!("error: {e}");
             return ExitCode::from(1);
         }
-    }
+    };
 
     // `QueuePath` is not `Copy` (TY-06: `PathBuf` wrapper), so the lock
     // takes a clone, exactly like the store (P6.F4).
     let service = QueueService::new(
-        FileQueueStore::new(config.queue_path().clone()),
+        store,
         ShellRunner::from(*config.shell()),
         EditorProcess::new(config.editor().clone()),
         FileQueueLock::new(config.queue_path().clone()),
