@@ -13,17 +13,26 @@
 //! shorthand is intentional: it lets all three ports be injected with mocks
 //! (TST-01), which the two-generic form cannot express.
 //!
-//! `start` preserves the legacy `process_queue` behaviour byte-for-byte:
-//! trim-before-run, unconditional removal of the first line (blank lines are
-//! removed, not run), a fresh re-read + rewrite each iteration, immediate
-//! error propagation before the rewrite, and a discarded child exit status.
-//! The strict trim + `Empty`-reject (V-TY-02) and exit-status surfacing
-//! (V-ERR-09) are deferred P6 changes and are NOT implemented here.
+//! `start` preserves the legacy `process_queue` flow — trim-before-run,
+//! unconditional removal of the first line (blank lines are removed, not
+//! run), a fresh re-read + rewrite each iteration, and immediate error
+//! propagation before the rewrite — with the P6.F3 failure handling added:
+//! a non-zero exit status (`RunError::Waited`, V-ERR-09 runner half, P6.F2)
+//! logs a `FailureRecord` to the store's failure log and removes the failed
+//! entry, then `start` either continues (the default) or stops with
+//! `QueueError::StoppedOnFailure` (`--stop-on-error`). Both modes remove the
+//! failed entry; the flag only changes stop-vs-continue and the exit status.
+//! Spawn/other runner failures mean the command never ran: nothing is
+//! logged, the entry stays queued, and the error propagates unchanged.
+//! The strict trim + `Empty`-reject (V-TY-02) is a deferred P6 change and
+//! is NOT implemented here.
 
+use crate::domain::failure::FailureRecord;
 use crate::domain::queue::{QueueEntry, QueueEntryError, QueuePath};
 use crate::ports::command_runner::{CommandRunner, RunError};
 use crate::ports::editor::{EditorError, EditorLauncher};
 use crate::ports::queue_store::{QueueStore, QueueStoreError};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The queue service, generic over its three injected ports.
 ///
@@ -68,6 +77,9 @@ pub enum QueueError {
     /// queue's length). The queue is left untouched.
     #[error("no queue entry at position {0}")]
     NoEntry(u64),
+    /// `--stop-on-error` was set and a command failed.
+    #[error("stopped after a failed command (--stop-on-error)")]
+    StoppedOnFailure,
 }
 
 impl<R, C, E> QueueService<R, C, E>
@@ -114,12 +126,19 @@ where
     /// not run but is still removed — the removal is unconditional), then drops
     /// the first entry by re-reading and rewriting the remainder. A store or
     /// runner error propagates immediately, before the rewrite, leaving the
-    /// queue unmodified up to that point. The runner now surfaces a non-zero
-    /// exit status as `RunError::Waited` (V-ERR-09 runner half, P6.F2); this
-    /// SERVICE still propagates it unchanged, so until P6.F3 lands a non-zero
-    /// exit ends `start` with an error (exit 1 in `main`) and the entry
-    /// retained — a transient state P6.F3 will replace with failure handling.
-    pub fn start(&self) -> Result<(), QueueError> {
+    /// queue unmodified up to that point.
+    ///
+    /// P6.F3 failure handling: when the runner reports a non-zero exit
+    /// (`RunError::Waited { code }`), the failure is logged to the store's
+    /// failure log as a [`FailureRecord`] (with the observed Unix timestamp
+    /// and the trimmed command) and the failed entry is removed, after which
+    /// `start` either continues with the next entry (the default) or stops
+    /// with `QueueError::StoppedOnFailure` when `stop_on_error` is set. Both
+    /// modes remove the failed entry; the flag only changes stop-vs-continue
+    /// and the exit status. Spawn/other runner failures are never logged:
+    /// the command never ran, so the entry stays queued and the error
+    /// propagates unchanged (exit 1 at the boundary).
+    pub fn start(&self, stop_on_error: bool) -> Result<(), QueueError> {
         loop {
             // Fresh read each iteration: the queue "may have been edited"
             // between iterations.
@@ -136,11 +155,33 @@ where
                 // path (never fails); its fallible `Err` arm maps through
                 // `#[from]` to `QueueError::Invalid` (GEN-01: no `unwrap`).
                 let trimmed = QueueEntry::new(first.as_str().trim())?;
-                // The runner surfaces a non-zero exit as `RunError::Waited`
-                // (V-ERR-09 runner half, P6.F2); the service propagates it
-                // unchanged until P6.F3 (transient: a non-zero exit ends
-                // `start` with an error, entry retained).
-                self.runner.run(&trimmed)?;
+                // P6.F3: a non-zero exit (`RunError::Waited`) logs the
+                // failure, removes the entry, then either continues or stops.
+                match self.runner.run(&trimmed) {
+                    Ok(()) => {}
+                    Err(RunError::Waited { code }) => {
+                        // Non-zero exit: log the failure, remove the entry,
+                        // then either continue or stop (binding order).
+                        self.store.append_failure(&FailureRecord {
+                            timestamp: unix_now(),
+                            exit_code: code,
+                            command: trimmed.clone(),
+                        })?;
+                        self.store.drop_first()?;
+                        if stop_on_error {
+                            return Err(QueueError::StoppedOnFailure);
+                        }
+                        // The failed entry was removed above: skip the
+                        // unconditional removal at the end of the loop body
+                        // and continue with the next entry.
+                        continue;
+                    }
+                    // Spawn/I/O failure: the command never ran — unchanged
+                    // behaviour: no failure-log record, the entry stays
+                    // queued, and the error propagates (exit 1 at the
+                    // boundary).
+                    Err(e) => return Err(e.into()),
+                }
             }
             // Unconditional removal: even a blank first line is dropped.
             // `drop_first` re-reads and rewrites the remainder (empty → no
@@ -187,19 +228,36 @@ where
     }
 }
 
+/// The current Unix timestamp in seconds, for `FailureRecord` (P6.F3).
+///
+/// `SystemTime::now()` is only documented as relative to the Unix epoch, so a
+/// pre-epoch (impossible) reading would make `duration_since` fail; that `Err`
+/// maps to `0` via `map_or` rather than panicking (GEN-01: no `unwrap`).
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     /// In-memory `QueueStore` mock: `entries` is the backing queue; `read_err`
     /// and `drop_err` are one-shot scripted failures (returned on the next
     /// matching call). Purely in-memory: no real file, no environment access.
+    /// P6.F3: `failures` records every `append_failure` call and
+    /// `drop_calls` counts every `drop_first` call, so tests can assert the
+    /// failure-log and removal behaviour without touching the filesystem.
     struct MockStore {
         entries: Mutex<Vec<QueueEntry>>,
         read_err: Mutex<Option<QueueStoreError>>,
         drop_err: Mutex<Option<QueueStoreError>>,
+        failures: Mutex<Vec<FailureRecord>>,
+        drop_calls: Mutex<u64>,
     }
 
     impl QueueStore for MockStore {
@@ -219,6 +277,7 @@ mod tests {
             if let Some(err) = self.drop_err.lock().unwrap().take() {
                 return Err(err);
             }
+            *self.drop_calls.lock().unwrap() += 1;
             let mut entries = self.entries.lock().unwrap();
             if !entries.is_empty() {
                 entries.remove(0);
@@ -230,19 +289,32 @@ mod tests {
             *self.entries.lock().unwrap() = entries.to_vec();
             Ok(())
         }
+
+        fn append_failure(&self, record: &FailureRecord) -> Result<(), QueueStoreError> {
+            self.failures.lock().unwrap().push(record.clone());
+            Ok(())
+        }
     }
 
     /// `CommandRunner` mock: records each `as_str()` it was asked to run and
-    /// returns the one-shot scripted `fail` error (consumed on the first call).
+    /// returns the one-shot scripted `fail` error (consumed on the first
+    /// call). P6.F3: `scripted` holds per-call results, consumed from the
+    /// back (one `pop` per `run` call), before falling back to `fail` and
+    /// then `Ok(())`; it lets a test script "first call fails with
+    /// `Waited`, second call succeeds" without any real process.
     struct MockRunner {
         ran: Mutex<Vec<String>>,
         fail: Mutex<Option<RunError>>,
+        scripted: Mutex<Vec<Result<(), RunError>>>,
     }
 
     impl CommandRunner for MockRunner {
         fn run(&self, entry: &QueueEntry) -> Result<(), RunError> {
             self.ran.lock().unwrap().push(entry.as_str().to_owned());
-            self.fail.lock().unwrap().take().map_or(Ok(()), Err)
+            match self.scripted.lock().unwrap().pop() {
+                Some(result) => result,
+                None => self.fail.lock().unwrap().take().map_or(Ok(()), Err),
+            }
         }
     }
 
@@ -265,18 +337,30 @@ mod tests {
         QueueEntry::new(line).unwrap()
     }
 
+    /// P6.F3: seconds since the Unix epoch for the test process (test-only
+    /// `expect`; TST-03), used to bound the failure-record timestamp window.
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time after the Unix epoch")
+            .as_secs()
+    }
+
     #[test]
     fn add_appends_entry_to_store() {
         let store = MockStore {
             entries: Mutex::new(Vec::new()),
             read_err: Mutex::new(None),
             drop_err: Mutex::new(None),
+            failures: Mutex::new(Vec::new()),
+            drop_calls: Mutex::new(0),
         };
         let service = QueueService::new(
             store,
             MockRunner {
                 ran: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
+                scripted: Mutex::new(Vec::new()),
             },
             MockEditor {
                 opened: Mutex::new(Vec::new()),
@@ -297,12 +381,15 @@ mod tests {
             entries: Mutex::new(vec![entry("a"), entry("   "), entry("c")]),
             read_err: Mutex::new(None),
             drop_err: Mutex::new(None),
+            failures: Mutex::new(Vec::new()),
+            drop_calls: Mutex::new(0),
         };
         let service = QueueService::new(
             store,
             MockRunner {
                 ran: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
+                scripted: Mutex::new(Vec::new()),
             },
             MockEditor {
                 opened: Mutex::new(Vec::new()),
@@ -328,10 +415,13 @@ mod tests {
             entries: Mutex::new(vec![entry("cmd")]),
             read_err: Mutex::new(None),
             drop_err: Mutex::new(None),
+            failures: Mutex::new(Vec::new()),
+            drop_calls: Mutex::new(0),
         };
         let runner = MockRunner {
             ran: Mutex::new(Vec::new()),
             fail: Mutex::new(None),
+            scripted: Mutex::new(Vec::new()),
         };
         let service = QueueService::new(
             store,
@@ -342,7 +432,7 @@ mod tests {
             },
         );
 
-        service.start().unwrap();
+        service.start(false).unwrap();
 
         assert_eq!(service.ls().unwrap(), Vec::<QueueEntry>::new());
         assert_eq!(*service.runner.ran.lock().unwrap(), vec!["cmd".to_owned()]);
@@ -354,10 +444,13 @@ mod tests {
             entries: Mutex::new(vec![entry("first"), entry("second")]),
             read_err: Mutex::new(None),
             drop_err: Mutex::new(None),
+            failures: Mutex::new(Vec::new()),
+            drop_calls: Mutex::new(0),
         };
         let runner = MockRunner {
             ran: Mutex::new(Vec::new()),
             fail: Mutex::new(None),
+            scripted: Mutex::new(Vec::new()),
         };
         let service = QueueService::new(
             store,
@@ -368,7 +461,7 @@ mod tests {
             },
         );
 
-        service.start().unwrap();
+        service.start(false).unwrap();
 
         assert_eq!(
             *service.runner.ran.lock().unwrap(),
@@ -383,10 +476,13 @@ mod tests {
             entries: Mutex::new(vec![entry("  cmd  ")]),
             read_err: Mutex::new(None),
             drop_err: Mutex::new(None),
+            failures: Mutex::new(Vec::new()),
+            drop_calls: Mutex::new(0),
         };
         let runner = MockRunner {
             ran: Mutex::new(Vec::new()),
             fail: Mutex::new(None),
+            scripted: Mutex::new(Vec::new()),
         };
         let service = QueueService::new(
             store,
@@ -397,7 +493,7 @@ mod tests {
             },
         );
 
-        service.start().unwrap();
+        service.start(false).unwrap();
 
         assert_eq!(*service.runner.ran.lock().unwrap(), vec!["cmd".to_owned()]);
         assert!(service.ls().unwrap().is_empty());
@@ -409,10 +505,13 @@ mod tests {
             entries: Mutex::new(vec![entry("   "), entry("cmd")]),
             read_err: Mutex::new(None),
             drop_err: Mutex::new(None),
+            failures: Mutex::new(Vec::new()),
+            drop_calls: Mutex::new(0),
         };
         let runner = MockRunner {
             ran: Mutex::new(Vec::new()),
             fail: Mutex::new(None),
+            scripted: Mutex::new(Vec::new()),
         };
         let service = QueueService::new(
             store,
@@ -423,11 +522,198 @@ mod tests {
             },
         );
 
-        service.start().unwrap();
+        service.start(false).unwrap();
 
         // Exactly one run: the blank first line is removed without being run,
         // then "cmd" runs.
         assert_eq!(*service.runner.ran.lock().unwrap(), vec!["cmd".to_owned()]);
+        assert!(service.ls().unwrap().is_empty());
+    }
+
+    /// P6.F3: a non-zero exit (`Waited { code: 3 }`) WITHOUT `stop_on_error`
+    /// logs the failure (record fields asserted), drops the failed entry,
+    /// and the loop continues and runs the next entry, ending `Ok(())`.
+    #[test]
+    fn start_waited_without_flag_logs_drops_and_continues() {
+        let before = now_secs();
+        let store = MockStore {
+            entries: Mutex::new(vec![entry("cmd"), entry("next")]),
+            read_err: Mutex::new(None),
+            drop_err: Mutex::new(None),
+            failures: Mutex::new(Vec::new()),
+            drop_calls: Mutex::new(0),
+        };
+        let runner = MockRunner {
+            ran: Mutex::new(Vec::new()),
+            fail: Mutex::new(None),
+            // `pop()` consumes from the back: the first `run` call fails
+            // with `Waited { code: 3 }`; the second call (script exhausted)
+            // falls back to `Ok(())`.
+            scripted: Mutex::new(vec![Err(RunError::Waited { code: 3 })]),
+        };
+        let service = QueueService::new(
+            store,
+            runner,
+            MockEditor {
+                opened: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+        );
+
+        assert!(matches!(service.start(false), Ok(())));
+
+        // Exactly one failure record, with the runner's exit code and the
+        // trimmed entry that was executed.
+        let failures = service.store.failures.lock().unwrap();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].exit_code, 3);
+        assert_eq!(failures[0].command.as_str(), "cmd");
+        // Timestamp within a sane window around the test (no exact
+        // wall-clock assertion).
+        let after = now_secs();
+        assert!(
+            failures[0].timestamp >= before && failures[0].timestamp <= after,
+            "recorded {} outside [{before}, {after}]",
+            failures[0].timestamp
+        );
+        drop(failures);
+
+        // The failed entry was dropped by the failure path, and the next
+        // entry by the loop's unconditional removal after it ran: two
+        // removals in total. The loop continued: the next entry ran, and
+        // the queue is now empty.
+        assert_eq!(*service.store.drop_calls.lock().unwrap(), 2);
+        assert_eq!(
+            *service.runner.ran.lock().unwrap(),
+            vec!["cmd".to_owned(), "next".to_owned()]
+        );
+        assert!(service.ls().unwrap().is_empty());
+    }
+
+    /// P6.F3: a non-zero exit WITH `stop_on_error` logs the failure, drops
+    /// the entry, and returns `Err(QueueError::StoppedOnFailure)` — and the
+    /// runner is NOT called a second time.
+    #[test]
+    fn start_waited_with_flag_stops_after_logging() {
+        let store = MockStore {
+            entries: Mutex::new(vec![entry("cmd"), entry("second")]),
+            read_err: Mutex::new(None),
+            drop_err: Mutex::new(None),
+            failures: Mutex::new(Vec::new()),
+            drop_calls: Mutex::new(0),
+        };
+        let runner = MockRunner {
+            ran: Mutex::new(Vec::new()),
+            fail: Mutex::new(None),
+            // `pop()` consumes from the back: if the runner were
+            // (incorrectly) called a second time, it would take this
+            // `Ok(())` and the loop would run past the failure — so a
+            // second `ran` entry proves it. The first call takes the
+            // `Waited`.
+            scripted: Mutex::new(vec![Ok(()), Err(RunError::Waited { code: 1 })]),
+        };
+        let service = QueueService::new(
+            store,
+            runner,
+            MockEditor {
+                opened: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+        );
+
+        let err = service.start(true).unwrap_err();
+        assert!(matches!(err, QueueError::StoppedOnFailure));
+
+        let failures = service.store.failures.lock().unwrap();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].exit_code, 1);
+        assert_eq!(failures[0].command.as_str(), "cmd");
+        drop(failures);
+        assert_eq!(*service.store.drop_calls.lock().unwrap(), 1);
+
+        // The runner was called exactly ONCE: it was not called a second
+        // time.
+        assert_eq!(*service.runner.ran.lock().unwrap(), vec!["cmd".to_owned()]);
+        // The failed entry was removed; the next one is still queued.
+        assert_eq!(
+            entry_lines(&service.ls().unwrap()),
+            vec!["second".to_owned()]
+        );
+    }
+
+    /// P6.F3: a `Spawn` error is unchanged behaviour — the command never
+    /// ran, so NO `append_failure` and NO `drop_first` call happens, the
+    /// entry stays queued, and the error propagates.
+    #[test]
+    fn start_spawn_error_logs_nothing_and_keeps_entry() {
+        let store = MockStore {
+            entries: Mutex::new(vec![entry("cmd"), entry("second")]),
+            read_err: Mutex::new(None),
+            drop_err: Mutex::new(None),
+            failures: Mutex::new(Vec::new()),
+            drop_calls: Mutex::new(0),
+        };
+        let runner = MockRunner {
+            ran: Mutex::new(Vec::new()),
+            fail: Mutex::new(Some(RunError::Spawn(std::io::Error::other("no shell")))),
+            // `scripted` is empty so the one-shot `fail` is returned on the
+            // first call.
+            scripted: Mutex::new(Vec::new()),
+        };
+        let service = QueueService::new(
+            store,
+            runner,
+            MockEditor {
+                opened: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+        );
+
+        let err = service.start(false).unwrap_err();
+        assert!(matches!(err, QueueError::Run(RunError::Spawn(_))));
+
+        // No failure was logged and nothing was dropped; the queue is
+        // untouched.
+        assert!(service.store.failures.lock().unwrap().is_empty());
+        assert_eq!(*service.store.drop_calls.lock().unwrap(), 0);
+        assert_eq!(
+            entry_lines(&service.ls().unwrap()),
+            vec!["cmd".to_owned(), "second".to_owned()]
+        );
+    }
+
+    /// P6.F3 regression guard: an all-successful `start` makes zero
+    /// `append_failure` calls.
+    #[test]
+    fn start_success_path_logs_no_failures() {
+        let store = MockStore {
+            entries: Mutex::new(vec![entry("a"), entry("b")]),
+            read_err: Mutex::new(None),
+            drop_err: Mutex::new(None),
+            failures: Mutex::new(Vec::new()),
+            drop_calls: Mutex::new(0),
+        };
+        let runner = MockRunner {
+            ran: Mutex::new(Vec::new()),
+            fail: Mutex::new(None),
+            scripted: Mutex::new(Vec::new()),
+        };
+        let service = QueueService::new(
+            store,
+            runner,
+            MockEditor {
+                opened: Mutex::new(Vec::new()),
+                fail: Mutex::new(None),
+            },
+        );
+
+        assert!(matches!(service.start(false), Ok(())));
+
+        assert!(service.store.failures.lock().unwrap().is_empty());
+        assert_eq!(
+            *service.runner.ran.lock().unwrap(),
+            vec!["a".to_owned(), "b".to_owned()]
+        );
         assert!(service.ls().unwrap().is_empty());
     }
 
@@ -437,10 +723,13 @@ mod tests {
             entries: Mutex::new(vec![entry("cmd"), entry("second")]),
             read_err: Mutex::new(None),
             drop_err: Mutex::new(None),
+            failures: Mutex::new(Vec::new()),
+            drop_calls: Mutex::new(0),
         };
         let runner = MockRunner {
             ran: Mutex::new(Vec::new()),
             fail: Mutex::new(Some(RunError::Other(std::io::Error::other("spawn failed")))),
+            scripted: Mutex::new(Vec::new()),
         };
         let service = QueueService::new(
             store,
@@ -451,7 +740,7 @@ mod tests {
             },
         );
 
-        let err = service.start().unwrap_err();
+        let err = service.start(false).unwrap_err();
         assert!(matches!(err, QueueError::Run(RunError::Other(_))));
 
         // Error is before the rewrite: the store STILL contains the entry.
@@ -472,10 +761,13 @@ mod tests {
                 "/tmp/mock-home/queue/commands.txt",
             )))),
             drop_err: Mutex::new(None),
+            failures: Mutex::new(Vec::new()),
+            drop_calls: Mutex::new(0),
         };
         let runner = MockRunner {
             ran: Mutex::new(Vec::new()),
             fail: Mutex::new(None),
+            scripted: Mutex::new(Vec::new()),
         };
         let service = QueueService::new(
             store,
@@ -486,7 +778,7 @@ mod tests {
             },
         );
 
-        let err = service.start().unwrap_err();
+        let err = service.start(false).unwrap_err();
         assert!(matches!(
             err,
             QueueError::Store(QueueStoreError::QueueFileMissing(_))
@@ -502,6 +794,8 @@ mod tests {
             entries: Mutex::new(Vec::new()),
             read_err: Mutex::new(None),
             drop_err: Mutex::new(None),
+            failures: Mutex::new(Vec::new()),
+            drop_calls: Mutex::new(0),
         };
         let editor = MockEditor {
             opened: Mutex::new(Vec::new()),
@@ -512,6 +806,7 @@ mod tests {
             MockRunner {
                 ran: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
+                scripted: Mutex::new(Vec::new()),
             },
             editor,
         );
@@ -533,6 +828,8 @@ mod tests {
             entries: Mutex::new(Vec::new()),
             read_err: Mutex::new(None),
             drop_err: Mutex::new(None),
+            failures: Mutex::new(Vec::new()),
+            drop_calls: Mutex::new(0),
         };
         let editor = MockEditor {
             opened: Mutex::new(Vec::new()),
@@ -543,6 +840,7 @@ mod tests {
             MockRunner {
                 ran: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
+                scripted: Mutex::new(Vec::new()),
             },
             editor,
         );
@@ -563,12 +861,15 @@ mod tests {
                 "/tmp/mock-home/queue/commands.txt",
             )))),
             drop_err: Mutex::new(None),
+            failures: Mutex::new(Vec::new()),
+            drop_calls: Mutex::new(0),
         };
         let service = QueueService::new(
             store,
             MockRunner {
                 ran: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
+                scripted: Mutex::new(Vec::new()),
             },
             MockEditor {
                 opened: Mutex::new(Vec::new()),
@@ -589,12 +890,15 @@ mod tests {
                 "permission denied",
             )))),
             drop_err: Mutex::new(None),
+            failures: Mutex::new(Vec::new()),
+            drop_calls: Mutex::new(0),
         };
         let service = QueueService::new(
             store,
             MockRunner {
                 ran: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
+                scripted: Mutex::new(Vec::new()),
             },
             MockEditor {
                 opened: Mutex::new(Vec::new()),
@@ -612,10 +916,13 @@ mod tests {
                 entries: Mutex::new(entries),
                 read_err: Mutex::new(None),
                 drop_err: Mutex::new(None),
+                failures: Mutex::new(Vec::new()),
+                drop_calls: Mutex::new(0),
             },
             MockRunner {
                 ran: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
+                scripted: Mutex::new(Vec::new()),
             },
             MockEditor {
                 opened: Mutex::new(Vec::new()),
@@ -705,10 +1012,13 @@ mod tests {
                     "/tmp/mock-home/queue/commands.txt",
                 )))),
                 drop_err: Mutex::new(None),
+                failures: Mutex::new(Vec::new()),
+                drop_calls: Mutex::new(0),
             },
             MockRunner {
                 ran: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
+                scripted: Mutex::new(Vec::new()),
             },
             MockEditor {
                 opened: Mutex::new(Vec::new()),
