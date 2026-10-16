@@ -21,7 +21,15 @@ pub enum Shell {
 #[error("'{input}' is not a valid shell: expected fish, bash, or sh")]
 pub struct ShellError {
     /// The offending input (owned, ERR-04).
-    pub input: String,
+    input: String,
+}
+
+impl ShellError {
+    /// The offending input (OP5/TY-03: read through an accessor, not a
+    /// `pub` field).
+    pub fn input(&self) -> &str {
+        &self.input
+    }
 }
 
 impl Shell {
