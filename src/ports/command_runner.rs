@@ -19,6 +19,8 @@ pub enum RunError {
     /// Declared as part of the frozen boundary; the current path discards the
     /// child's exit status (V-ERR-09 is a deferred P5 behaviour change), so no
     /// adapter constructs this variant yet.
+    // Deferred landing point (V-ERR-09 exit-status surfacing is a P5/P6 change per PLAN.md); not constructed before then, hence the non-test dead_code suppression.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[error("`fish -c` exited unsuccessfully: {code}")]
     Waited { code: i32 },
     /// Wait I/O failed, or any other unclassifiable runner failure.

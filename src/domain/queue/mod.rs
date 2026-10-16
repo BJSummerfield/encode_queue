@@ -126,6 +126,8 @@ pub enum QueueEntryError {
     ///
     /// Reserved for the deferred strict `QueueEntry` constructor; not
     /// produced on the P5 (lenient) path.
+    // Deferred landing point (strict-Empty reject is a P5/P6 change per PLAN.md); not constructed before then, hence the non-test dead_code suppression.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[error("command line is empty")]
     Empty,
 }

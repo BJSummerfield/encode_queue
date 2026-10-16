@@ -1,122 +1,70 @@
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable
+    )
+)]
+#![deny(clippy::inherent_to_string_shadow_display)]
+
 mod config;
 mod domain;
 mod inbound;
 mod outbound;
 mod ports;
 
-use clap::{Arg, ArgAction, Command};
-use std::{
-    env,
-    fs::{self, File, OpenOptions},
-    io::{self, BufRead, BufReader, Write},
-    path::{Path, PathBuf},
-    process::{Command as SystemCommand, Stdio},
-};
+use std::fs;
+use std::process::ExitCode;
 
-fn main() -> io::Result<()> {
-    let matches = Command::new("Encode Queue")
-        .version("1.0")
-        .author("brianjsummerfield@gmail.com")
-        .about("Manages a queue of commands")
-        .subcommand_required(true)
-        .subcommand(
-            Command::new("add")
-                .about("Adds a command to the queue")
-                .arg(
-                    Arg::new("COMMAND")
-                        .help("The command to add")
-                        .required(true)
-                        .action(ArgAction::Set),
-                ),
-        )
-        .subcommand(Command::new("start").about("Starts processing the queue"))
-        .subcommand(Command::new("ls").about("Lists all commands in the queue"))
-        .subcommand(Command::new("edit").about("Opens the queue in an editor"))
-        .get_matches();
+use crate::config::Config;
+use crate::domain::queue::service::QueueService;
+use crate::inbound::cli::{Cli, CliError};
+use crate::outbound::editor::EditorProcess;
+use crate::outbound::fish::FishRunner;
+use crate::outbound::queue_file::FileQueueStore;
 
-    let home_dir = env::var("HOME").expect("HOME environment variable not set");
-    let queue_dir = PathBuf::from(home_dir).join(".config/encode_queue");
-    let queue_path = queue_dir.join("commands.txt");
-
-    fs::create_dir_all(queue_dir)?;
-
-    match matches.subcommand() {
-        Some(("add", sub_matches)) => {
-            let command = sub_matches.get_one::<String>("COMMAND").unwrap();
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&queue_path)?;
-            writeln!(file, "{}", command)?;
+fn main() -> ExitCode {
+    let config = match Config::from_env() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(1);
         }
-        Some(("start", _)) => {
-            process_queue(&queue_path)?;
-        }
-        Some(("ls", _)) => {
-            let contents = fs::read_to_string(&queue_path)?;
-            println!("{}", contents);
-        }
-        Some(("edit", _)) => {
-            open_editor(queue_path.to_str().unwrap())?;
-        }
-        _ => unreachable!(),
-    }
+    };
 
-    Ok(())
-}
-
-fn process_queue(queue_path: &Path) -> io::Result<()> {
-    loop {
-        let file = File::open(queue_path)?;
-        let mut reader = BufReader::new(&file);
-        let mut first_line = String::new();
-        if reader.read_line(&mut first_line)? == 0 {
-            break;
-        }
-
-        if !first_line.trim().is_empty() {
-            let mut child = SystemCommand::new("fish")
-                .arg("-c")
-                .arg(first_line.trim())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .spawn()?;
-
-            child.wait()?;
-        }
-
-        let file = File::open(queue_path)?;
-        let lines = BufReader::new(&file).lines();
-        let all_lines: Vec<String> = lines.collect::<Result<_, _>>()?;
-
-        if all_lines.len() > 1 {
-            let remaining_lines = &all_lines[1..];
-
-            let mut file = OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(queue_path)?;
-            for line in remaining_lines {
-                writeln!(file, "{}", line)?;
-            }
-        } else {
-            OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(queue_path)?;
+    // Legacy bootstrap parity (behaviour contract): the queue directory is
+    // created before any subcommand dispatches, so `add` works on a fresh
+    // `$HOME` while a missing queue file still surfaces as
+    // `QueueFileMissing` for `ls`/`start`.
+    if let Some(queue_dir) = config.queue_path().as_path().parent() {
+        if let Err(e) = fs::create_dir_all(queue_dir) {
+            eprintln!("error: {e}");
+            return ExitCode::from(1);
         }
     }
 
-    Ok(())
-}
+    let service = QueueService::new(
+        FileQueueStore::new(config.queue_path().clone()),
+        FishRunner::new(),
+        EditorProcess::new(config.editor().clone()),
+    );
+    let cli = Cli::new(service, config.queue_path().clone());
 
-fn open_editor(file_path: &str) -> std::io::Result<()> {
-    let editor = env::var("EDITOR").unwrap_or_else(|_| "nvim".to_string());
-
-    SystemCommand::new(editor)
-        .arg(file_path)
-        .status()
-        .expect("Failed to open editor");
-
-    Ok(())
+    match cli.run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(CliError::BadCommand(e)) => {
+            eprintln!("invalid command: {e}");
+            ExitCode::from(2)
+        }
+        Err(CliError::MissingArgument(arg)) => {
+            eprintln!("error: missing required argument: {arg}");
+            ExitCode::from(2)
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(1)
+        }
+    }
 }
