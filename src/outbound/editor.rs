@@ -95,11 +95,12 @@ mod tests {
     /// Build an `EditorProcess` whose editor is the fake script at `script`,
     /// and a queue path `dir/commands.txt` (created so the fake can inspect
     /// its argument).
-    fn fixture(script: &Path, dir: &Path) -> (EditorProcess, QueuePath, PathBuf) {
+    fn fixture(script: &Path, dir: &Path) -> Result<(EditorProcess, QueuePath, PathBuf), String> {
         let queue_path = dir.join("commands.txt");
         std::fs::write(&queue_path, "").unwrap();
-        let launcher = EditorProcess::new(Editor::new(Some(script.to_str().unwrap())));
-        (launcher, QueuePath::new(queue_path.clone()), queue_path)
+        let name = script.to_str().ok_or("script path is not valid Unicode")?;
+        let launcher = EditorProcess::new(Editor::new(Some(name)));
+        Ok((launcher, QueuePath::new(queue_path.clone()), queue_path))
     }
 
     fn cleanup(dir: &Path) {
@@ -107,14 +108,14 @@ mod tests {
     }
 
     #[test]
-    fn open_succeeds_and_passes_the_queue_path_as_the_single_argument() {
+    fn open_succeeds_and_passes_the_queue_path_as_the_single_argument() -> Result<(), String> {
         let dir = temp_dir();
         let script = write_script(
             &dir,
             "editor.sh",
             r#"printf '%s\n' "$1" > "$(dirname "$1")/editor_arg.txt""#,
         );
-        let (launcher, queue, queue_path) = fixture(&script, &dir);
+        let (launcher, queue, queue_path) = fixture(&script, &dir)?;
 
         assert_eq!(launcher.open(&queue).unwrap(), ());
 
@@ -122,18 +123,20 @@ mod tests {
         let arg = std::fs::read_to_string(dir.join("editor_arg.txt")).unwrap();
         assert_eq!(arg.trim_end(), queue_path.display().to_string());
         cleanup(&dir);
+        Ok(())
     }
 
     #[test]
-    fn open_discards_a_nonzero_exit_status() {
+    fn open_discards_a_nonzero_exit_status() -> Result<(), String> {
         let dir = temp_dir();
         let script = write_script(&dir, "editor.sh", "exit 3");
-        let (launcher, queue, _) = fixture(&script, &dir);
+        let (launcher, queue, _) = fixture(&script, &dir)?;
 
         // Legacy behaviour preserved: only spawn/wait I/O errors fail; the
         // editor's exit status is discarded.
         assert_eq!(launcher.open(&queue).unwrap(), ());
         cleanup(&dir);
+        Ok(())
     }
 
     #[test]
