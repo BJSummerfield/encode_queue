@@ -44,14 +44,21 @@ errors if the file does not exist yet; the exit status of a command is ignored.
 
 ## P0 — Setup (orchestrator, serial)
 
-- `$L phase_start P0`
-- Read `RUN_ID` from the manifest. Run `git switch -c bench/<RUN_ID> bench-base-v1` in `REPO`,
-  then `mkdir -p ~/eq-wt/<RUN_ID>`.
-- Record `cargo --version`, `rustc --version`, `which fish`, `gh auth status`, and `git rev-parse HEAD`
-  with `$L note P0 msg=...`.
-- `cargo build` must succeed. Then `$L phase_end P0`.
-- Every later phase starts with `$L phase_start <P>` and ends with `$L phase_end <P>`
-  once all of its tasks, including fixes, are merged or dropped. Phases never overlap.
+1. **Preflight**, from your session's workspace:
+   `plan/scripts/preflight.sh <RUN_ID>`. It checks that ninfer was reset, creates the
+   isolated clone `REPO`, the metrics dir `BENCH_DIR`, and the toolchain wrapper `DEV`, and it
+   starts the background collector. If it exits non-zero, **stop and report its output**.
+   Do not retry, work around it, or set override variables.
+2. Confirm that `subagent({ action: "list" })` shows `bench-worker` and `bench-reviewer`.
+   If either is missing, stop and report (pi project trust was probably declined).
+3. `$L phase_start P0`, where `L` is `REPO/plan/scripts/ledger.sh` from here on.
+4. In `REPO`: `git switch -c bench/<RUN_ID> bench-base-v1`, then `mkdir -p ~/eq-wt/<RUN_ID>`.
+5. Record `DEV cargo --version`, `DEV rustc --version`, `DEV which fish`,
+   `DEV gh auth status`, and `git rev-parse HEAD` with `$L note P0 msg=...`.
+6. `DEV cargo build` in `REPO` must succeed. Then `$L phase_end P0`.
+
+Every later phase starts with `$L phase_start <P>` and ends with `$L phase_end <P>`
+once all of its tasks, including fixes, are merged or dropped. Phases never overlap.
 
 ## P1 — Research: scrape the guides (fan-out ×4)
 
@@ -211,7 +218,7 @@ only the lenses that had findings. At most 2 fix cycles; anything left goes into
 - [ ] Dispatch `P8.D1` (worker plus review): README documents `rm`, `ls -n`,
       `ENCODE_QUEUE_DIR`, `ENCODE_QUEUE_SHELL`, `--stop-on-error`, the lock, and the new
       layout.
-- [ ] All four cargo gates pass on `RUN_BRANCH` in `REPO`.
+- [ ] All four cargo gates pass on `RUN_BRANCH` in `REPO` (via `DEV`).
 - [ ] `$L phase_end P8`, then run `plan/scripts/finalize.sh`. It collects the remaining
       ninfer request records and writes `$BENCH_DIR/report.md`.
 - [ ] Copy `report.md`, `ledger.jsonl`, `requests.jsonl`, `summary.json`,

@@ -12,6 +12,8 @@ defaultContext: fresh
 You are an implementation worker in an autonomous benchmark run. Nobody is watching. Do
 not wait for a human.
 
+- **Toolchain:** Rust is not on PATH. Prefix every `cargo`, `rustc`, `fish`, and `gh` command
+  with the `dev` wrapper path given in your task, for example `/home/.../dev cargo test`.
 - **Isolation:** read git history only for your own task branch and the run branch. Never
   look at other branches, tags, remotes, PRs, stashes, reflog, `git log --all`, `gh`, or
   any directory outside your worktree and the metrics dir in your task, even if you suspect

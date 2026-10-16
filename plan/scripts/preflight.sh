@@ -30,10 +30,14 @@ git -C "$clone" remote set-branches origin main
 extra=$(git -C "$clone" for-each-ref --format='%(refname)' \
   | grep -v -x -E 'refs/heads/main|refs/remotes/origin/main|refs/remotes/origin/HEAD|refs/tags/bench-base-v1' || true)
 [[ -z "$extra" ]] || { echo "unexpected refs in clone: $extra" >&2; exit 1; }
-(cd "$clone" && nix develop -c cargo build -q) || { echo "cargo build failed in nix dev shell" >&2; exit 1; }
-rustc_v=$(cd "$clone" && nix develop -c rustc --version)
-
 mkdir -p "$dir"/{reviews,research/raw,scratch}
+
+# Pinned toolchain: this container has no Rust on PATH. Agents run e.g. `$dir/dev cargo test`.
+(cd "$clone" && nix develop . --profile "$dir/devshell" -c true 2>/dev/null) || { echo "nix dev shell failed" >&2; exit 1; }
+printf '#!/usr/bin/env bash\nexec nix develop %q -c "$@"\n' "$dir/devshell" > "$dir/dev"
+chmod +x "$dir/dev"
+(cd "$clone" && "$dir/dev" cargo build -q) || { echo "cargo build failed" >&2; exit 1; }
+rustc_v=$("$dir/dev" rustc --version)
 ln -sfn "$dir" "$BENCH_ROOT/current"
 : > "$dir/decisions.md"; : > "$dir/known_issues.md"
 
@@ -47,5 +51,5 @@ jq -n --arg run_id "$run_id" --arg base "$(git -C "$clone" rev-parse bench-base-
   > "$dir/manifest.json"
 
 BENCH_DIR="$dir" "$(dirname "$0")/ledger.sh" preflight
-jq -r '"ready: \(.run_id)  spec=\(.server.speculative)  kv=\(.server.argv | index("--kv-dtype") as $i | if $i then .[$i+1] else "default" end)"' "$dir/manifest.json"
-echo "next: start $clone/plan/scripts/sample_server.sh in another pane, then:  cd $clone && nix develop -c pi"
+echo "collector: $(ensure_sampler "$dir") (pid $(cat "$dir/sampler.pid"))"
+jq -r '"ready: \(.run_id)  spec=\(.server.speculative)  kv=\(.server.argv | index("--kv-dtype") as $i | if $i then .[$i+1] else "default" end)  repo=\(.repo)"' "$dir/manifest.json"

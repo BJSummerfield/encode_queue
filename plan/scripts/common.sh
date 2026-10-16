@@ -26,3 +26,22 @@ collect_requests() {
     | jq -c --argjson s "$since" 'sort_by(.ts) | .[] | select(.ts > $s)' >> "$dir/requests.jsonl" \
     || echo "warning: request collection failed at $(now_iso)" >&2
 }
+
+# Starts the background collector for <dir> unless its recorded PID is still alive.
+# Prints "started" or "running".
+ensure_sampler() {
+  local dir="$1" pid
+  pid=$(cat "$dir/sampler.pid" 2>/dev/null || true)
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then echo running; return; fi
+  BENCH_DIR="$dir" setsid nohup "$(dirname "${BASH_SOURCE[0]}")/sample_server.sh" \
+    >> "$dir/sampler.log" 2>&1 < /dev/null &
+  echo $! > "$dir/sampler.pid"
+  echo started
+}
+
+stop_sampler() {
+  local dir="$1" pid
+  pid=$(cat "$dir/sampler.pid" 2>/dev/null || true)
+  [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+  rm -f "$dir/sampler.pid"
+}

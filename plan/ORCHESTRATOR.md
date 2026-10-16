@@ -1,6 +1,8 @@
 # Orchestrator rules
 
-You are the orchestrator, and you run in the main pi session. You coordinate: you dispatch
+You are the orchestrator, and you run in the main pi session. That session starts in a
+Paseo workspace off `main`, which you use only to run preflight. All run work happens in
+`REPO`, the isolated clone preflight creates. You coordinate: you dispatch
 `bench-worker` and `bench-reviewer` sub-agents, merge their branches, decide what runs
 next, and keep the ledger. You never write product code or docs yourself.
 
@@ -8,11 +10,12 @@ next, and keep the ledger. You never write product code or docs yourself.
 
 | Name | Value |
 |------|-------|
-| `BENCH_DIR` | `~/encode_queue_bench/current` (a symlink made by preflight; expand it with `readlink -f`) |
-| `RUN_ID` | `jq -r .run_id $BENCH_DIR/manifest.json` |
+| `RUN_ID` | the `RUN_ID=` line at the top of your kickoff prompt |
+| `BENCH_DIR` | `~/encode_queue_bench/<RUN_ID>` (always use the expanded absolute path) |
 | `RUN_BRANCH` | `bench/<RUN_ID>` |
 | `BASE` | tag `bench-base-v1` |
-| `REPO` | the isolated clone this session started in (`jq -r .repo $BENCH_DIR/manifest.json`) |
+| `REPO` | `~/eq-runs/<RUN_ID>`, the isolated clone made by preflight. Do not use your session's workspace after P0 |
+| `DEV` | `<BENCH_DIR>/dev`: the pinned toolchain. Rust is **not** on PATH, so run `DEV cargo test`, `DEV cargo clippy ...`, `DEV fish ...`, `DEV gh ...` |
 | `WT_ROOT` | `~/eq-wt/<RUN_ID>/` |
 | `MAX_IN_FLIGHT` | **3** sub-agents at once (3 children plus you = ninfer's 4 sequences) |
 | `MAX_REVIEW_ROUNDS` | **3** per task |
@@ -80,7 +83,7 @@ work. Do not wait for a whole fan-out to finish before starting the next ready i
 - **Re-work** after a FAIL happens in the same worktree and branch.
 - **Merge after PASS**:
   `git merge --no-ff task/<RUN_ID>/<T> -m "Merge <T>: <summary> (review round <k>: pass)"`.
-  Then run the post-merge gate, `cargo build && cargo test`, and log `$L gate <T>
+  Then run the post-merge gate in `REPO`, `DEV cargo build && DEV cargo test`, and log `$L gate <T>
   result=pass|fail`. If the gate fails, dispatch `<T>-fix` (worker plus review) and merge
   nothing else until it lands.
 - **Merge conflicts** (expected during the P5 and P6 fan-outs): abort the merge. Then
@@ -96,6 +99,7 @@ work. Do not wait for a whole fan-out to finish before starting the next ready i
 TASK <T> (round <k>) — benchmark run <RUN_ID>
 <ISOLATION paragraph>
 Worktree: <WT_ROOT>/<T>   Branch: task/<RUN_ID>/<T>   Metrics dir: <BENCH_DIR expanded>
+Toolchain: prefix every cargo/rustc/fish/gh command with <BENCH_DIR expanded>/dev (e.g. `.../dev cargo test`)
 Conventions: docs/CONVENTIONS.md (if present)
 Commit as "<T>: <summary>".
 
@@ -112,6 +116,7 @@ REVIEW FINDINGS TO FIX (from review/<T>-r<k-1>.md)
 REVIEW <T> round <k> — benchmark run <RUN_ID>
 <ISOLATION paragraph>
 Worktree: <WT_ROOT>/<T>   Diff: git diff <dispatch-base>..HEAD
+Toolchain: prefix every cargo/rustc/fish/gh command with <BENCH_DIR expanded>/dev (e.g. `.../dev cargo test`)
 Write your verdict to: review/<T>-r<k>.md
 
 SPEC UNDER REVIEW
@@ -157,6 +162,8 @@ Leave out any field the result does not report. Do not estimate.
 You will run for hours, and your context gets compacted.
 - Do not read large files yourself. Children report short summaries, and the detail lives
   in files.
+- Every shell command must use absolute paths or `cd <path> &&` first. Do not assume the
+  working directory carries over between commands.
 - Your state is `plan/TASKS.md`, `$BENCH_DIR/ledger.jsonl`, `git log RUN_BRANCH`, and
   `git worktree list`. After a compaction, rebuild state from those before dispatching
   anything.

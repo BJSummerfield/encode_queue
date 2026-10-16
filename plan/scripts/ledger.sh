@@ -23,3 +23,8 @@ jq -nc --arg ts "$(now_iso)" --argjson epoch_ms "$(now_ms)" \
   --argjson fields "$fields" --argjson server "$(ninfer_snapshot)" \
   '{ts: $ts, epoch_ms: $epoch_ms, event: $event, task: $task, role: $role} + $fields + {server: $server}' \
   >> "$BENCH_DIR/ledger.jsonl"
+
+# Self-heal the collector at every phase boundary (request collection resumes losslessly).
+if [[ "$event" == "phase_start" && "$(ensure_sampler "$(readlink -f "$BENCH_DIR")")" == started ]]; then
+  "$0" note "$task" msg="collector was not running; restarted"
+fi

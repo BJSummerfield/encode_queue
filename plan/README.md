@@ -22,14 +22,14 @@ changes during a run.
 | File | Audience | Purpose |
 |------|----------|---------|
 | `README.md` | human | This runbook |
-| `KICKOFF.md` | orchestrator | The prompt you paste. **Identical for every run.** |
+| `KICKOFF.md` | orchestrator | The prompt you paste. Only its `RUN_ID=` line changes between runs |
 | `ORCHESTRATOR.md` | orchestrator | Continuous batching, git/worktrees, review loop, ledger |
 | `TASKS.md` | everyone | Phase/task DAG, specs, acceptance criteria |
 | `EVALUATION.md` | final judge (Opus/Fable) | Rubric for comparing the runs |
 | `../.pi/agents/bench-worker.md` | pi | Worker agent (shell + edit, commits in its worktree) |
 | `../.pi/agents/bench-reviewer.md` | pi | Adversarial reviewer (shell, runs the cargo gates, read-only on code) |
-| `scripts/preflight.sh` | human | Creates the run's metrics dir and manifest, checks the server is fresh |
-| `scripts/sample_server.sh` | human | Background collector: KV gauges plus every ninfer request record |
+| `scripts/preflight.sh` | orchestrator (P0) | Isolated clone, metrics dir, manifest, toolchain wrapper, starts the collector |
+| `scripts/sample_server.sh` | preflight (background) | Background collector: KV gauges plus every ninfer request record |
 | `scripts/ledger.sh` | orchestrator | Appends ledger events, each with a ninfer counter snapshot |
 | `scripts/finalize.sh` | orchestrator (P8) | Final collection and `report.md` |
 | `scripts/ledger_report.sh` | anyone | Ledger and request records → markdown tables |
@@ -89,69 +89,45 @@ logged requests, not over the current instance.
 ## Isolation
 
 Each run happens in a fresh single-branch clone at `~/eq-runs/<run-id>`, which preflight
-creates. The only refs in it are `main` and `bench-base-v1`, so agents can't stumble onto
+creates. The only refs in the clone are `main` and `bench-base-v1`, so agents can't stumble onto
 `design-file-improvement-orchestrator` (an earlier hexagonal refactor of this repo) or
 another run's `bench/*` branch. Its fetch refspec is limited to `main`. The orchestrator
 rules, the kickoff prompt, and both agent definitions also forbid reading other refs,
-remotes, PRs, or directories. Never start a run from a paseo worktree of
-`~/projects/encode_queue`, because worktrees share every branch of the main repo.
+remotes, PRs, or directories. The Paseo workspace you start in is used only to launch
+preflight. It shares every branch of `~/projects/encode_queue`, which is why
+all work moves to the clone after P0.
 
-## Runbook
+## Runbook (Paseo)
 
-### 1. Reset ninfer (on the GPU host, not in this container)
+For each run, in the order `mtp-run1`, `dflash-k8v4-run1`, `mtp-run2`, `dflash-k8v4-run2`:
 
-ninfer runs in the `local-llm` nixos-container. Its request log is at host path
-`/var/lib/local-llm/ninfer/requests.jsonl`. The ops service keeps the last 50,000
-requests in memory, so you must stop **both** units, rotate the log, and start them again:
+**1. Reset ninfer on the GPU host.** ninfer runs in the `local-llm` nixos-container there,
+and its request log is at host path `/var/lib/local-llm/ninfer/requests.jsonl`. The ops
+service keeps the last 50,000 requests in memory, so stop both units, rotate the log, set
+the config, and start both again:
 
 ```sh
-RUN=mtp-run1   # the run you are about to do
+RUN=mtp-run1
 sudo nixos-container run local-llm -- systemctl stop ninfer-metrics ninfer
 sudo mv /var/lib/local-llm/ninfer/requests.jsonl /var/lib/local-llm/ninfer/requests.pre-$RUN.jsonl
-# set the run's config: NINFER_EXTRA_ARGS=... in /var/lib/local-llm/ninfer.env (or your usual way)
+# set this run's config (MTP, or DFlash + k8v4) in /var/lib/local-llm/ninfer.env
 sudo nixos-container run local-llm -- systemctl start ninfer ninfer-metrics
 ```
 
-Wait until `curl -s https://llm.mist-gamma.ts.net:8443/ops/health` shows the engine `ok`.
+**2. Start the run in Paseo.** Create a new workspace off `main`, open a pi session, and
+paste `KICKOFF.md` with the `RUN_ID=` line set. Accept project trust if pi asks. That's
+it. In P0 the orchestrator runs `plan/scripts/preflight.sh`, which:
+- stops the run if step 1 was skipped (the ops counters weren't reset);
+- creates the isolated clone `~/eq-runs/<run-id>` and checks it equals `bench-base-v1`;
+- creates `~/encode_queue_bench/<run-id>/` with the manifest (including the server config)
+  and a `dev` wrapper for the pinned Rust toolchain (this container has no Rust on PATH);
+- starts the background collector, which records ninfer request data for the whole run.
+  The ledger restarts it at every phase boundary if it has died, and P8's `finalize.sh`
+  stops it.
 
-### 2. Preflight (in this container, from any up-to-date checkout of `main`)
-
-```sh
-plan/scripts/preflight.sh <run-id>
-```
-
-Preflight:
-- refuses to run if the ops counters weren't reset (`ALLOW_STALE_LOG=1` overrides this,
-  and the manifest records that you did);
-- creates the isolated clone `~/eq-runs/<run-id>` and checks it is exactly `bench-base-v1`;
-- creates `~/encode_queue_bench/<run-id>/` and points `current` at it, which is how the
-  identical kickoff prompt knows which run it is;
-- records the server config in `manifest.json` and prints `spec=… kv=…`. **Check that it
-  matches the run table.**
-
-### 3. Start the collector (own tmux pane, leave it running)
-
-```sh
-~/eq-runs/<run-id>/plan/scripts/sample_server.sh
-```
-
-### 4. Kick off
-
-```sh
-cd ~/eq-runs/<run-id> && nix develop -c pi
-```
-
-`nix develop` puts the pinned toolchain from `flake.lock` (cargo, clippy, rustfmt, fish, gh)
-on PATH for pi and every child it spawns. This container has no Rust otherwise.
-
-Accept project trust when pi asks; without it the bench agents don't load. Optionally
-check that `bench-worker` and `bench-reviewer` appear in `subagent({ action: "list" })`.
-Paste the prompt from `KICKOFF.md`, then leave it alone.
-
-### 5. Postflight (after the PR is open)
-
-Stop the collector with Ctrl-C, then run `~/eq-runs/<run-id>/plan/scripts/finalize.sh`
-so `report.md` includes the last requests. Move on to the next run starting at step 1.
+**3. When it's done**, the PR is open (or the branch is pushed with a compare link, if `gh`
+isn't logged in). Check that the first line of `~/encode_queue_bench/<run-id>/report.md`
+shows the expected config, then move to the next run.
 
 ### After all four runs
 
