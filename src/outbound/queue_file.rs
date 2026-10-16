@@ -29,8 +29,20 @@ pub struct FileQueueStore {
 
 impl FileQueueStore {
     /// Wrap the queue file path; the store owns it from here on.
-    pub fn new(path: QueuePath) -> Self {
-        Self { path }
+    ///
+    /// P7.FIX03 (ARCH-02/ARCH-03): creating the queue directory moved here
+    /// from `main` (behaviour contract: "dir created if missing"). If the
+    /// path has a non-empty parent, it is `create_dir_all`'d; a bare
+    /// relative filename (`None`/empty parent) skips the mkdir, mirroring
+    /// the legacy bootstrap's `is_empty()` skip. A creation failure is the
+    /// `Io` catch-all with the OS error kept as its `#[source]` (ERR-04).
+    pub fn new(path: QueuePath) -> Result<Self, QueueStoreError> {
+        if let Some(parent) = path.as_path().parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent).map_err(QueueStoreError::Io)?;
+            }
+        }
+        Ok(Self { path })
     }
 }
 
@@ -181,6 +193,7 @@ mod tests {
 
     fn store(path: &Path) -> FileQueueStore {
         FileQueueStore::new(QueuePath::new(path.to_path_buf()))
+            .expect("test temp dir always creatable")
     }
 
     #[test]
@@ -342,12 +355,16 @@ mod tests {
     /// appended to: opening the failure log fails `NotFound` and is
     /// classified as `QueueFileMissing` carrying the (missing) queue
     /// directory (ERR-04: no new error variant).
+    ///
+    /// P7.FIX03: the directory is removed *after* store construction —
+    /// `FileQueueStore::new` now creates the parent (moved from `main`),
+    /// while `append_failure` itself still creates nothing.
     #[test]
     fn append_failure_in_missing_parent_directory_is_queue_file_missing() {
         let path = temp_queue_path();
         let queue_dir = path.parent().unwrap().to_path_buf();
-        fs::remove_dir(&queue_dir).unwrap(); // the queue path's parent is gone
         let queue = store(&path);
+        fs::remove_dir(&queue_dir).unwrap(); // the queue path's parent is gone
 
         let err = queue.append_failure(&failure(1, 1, "cmd")).unwrap_err();
         // `map_io_error` classifies against the path it tried to open —
