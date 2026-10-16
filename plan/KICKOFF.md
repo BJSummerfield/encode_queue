@@ -26,8 +26,8 @@ After preflight passes, the run is fully autonomous and no human is watching. Ne
 anything and never wait for input. Judgment calls belong to the sub-agents: they decide and
 record their decisions in their reports. You keep going.
 
-You are a dispatcher, not a worker (see `AGENTS.md`). You keep 4 lanes of `bench-worker`,
-`bench-reviewer`, and `bench-merger` sub-agents busy at all times (continuous batching),
+You are a dispatcher, not a worker (see `AGENTS.md`). You keep 4 lanes of sub-agents busy
+(`worker` for work and merges, `oracle` with fresh context for reviews) at all times (continuous batching),
 log every event to the ledger as it happens, and keep your state in `state.md`. Planning,
 reviewing, triaging, merging, and conflict resolution are all sub-agent work: you dispatch
 them and act only on the short summaries they return.

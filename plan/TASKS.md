@@ -49,8 +49,7 @@ errors if the file does not exist yet; the exit status of a command is ignored.
    isolated clone `REPO`, the metrics dir `BENCH_DIR`, and the toolchain wrapper `DEV`, and it
    starts the background collector. If it exits non-zero, **stop and report its output**.
    Do not retry, work around it, or set override variables.
-2. Confirm that `subagent({ action: "list" })` shows `bench-worker`, `bench-reviewer`, and `bench-merger`.
-   If either is missing, stop and report (pi project trust was probably declined).
+2. Confirm that `subagent({ action: "list" })` shows `worker` and `oracle`. If either is missing, stop and report.
 3. `$L phase_start P0`, where `L` is `REPO/plan/scripts/ledger.sh` from here on.
 4. In `REPO`: `git switch -c bench/<RUN_ID> bench-base-v1`, then `mkdir -p ~/eq-wt/<RUN_ID>`.
 5. Record `DEV cargo --version`, `DEV rustc --version`, `DEV which fish`,
@@ -271,7 +270,7 @@ Three independent reviewer-only tasks on `RUN_BRANCH`:
    `ENCODE_QUEUE_DIR`, `ENCODE_QUEUE_SHELL`, `--stop-on-error`, the lock, and the new
    layout.
 2. The orchestrator logs `$L phase_end P8`.
-3. **P8.SHIP** (`bench-merger`, in `REPO`, report `reports/P8.SHIP.md`):
+3. **P8.SHIP** (merger: `worker` in `REPO`, output `reports/P8.SHIP.md`):
    - Run all four cargo gates via `DEV`, and record any failures in `known_issues.md`.
    - Run `plan/scripts/finalize.sh`. It waits up to 15 minutes for the last RAM-tier tile.
    - Copy `report.md`, `ledger.jsonl`, `requests.jsonl`, `tiles.jsonl`, `server.jsonl`,

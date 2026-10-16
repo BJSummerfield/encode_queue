@@ -26,10 +26,7 @@ changes during a run.
 | `ORCHESTRATOR.md` | orchestrator | Continuous batching, git/worktrees, review loop, ledger |
 | `TASKS.md` | everyone | Phase/task DAG, specs, acceptance criteria |
 | `EVALUATION.md` | final judge (Opus/Fable) | Rubric for comparing the runs |
-| `../.pi/agents/bench-worker.md` | pi | Worker agent (shell + edit, commits in its worktree) |
-| `../.pi/agents/bench-reviewer.md` | pi | Adversarial reviewer (shell, runs the cargo gates, read-only on code) |
-| `../.pi/agents/bench-merger.md` | pi | Merger (merges into the run branch, resolves conflicts, post-merge gate; also runs P8.SHIP) |
-| `../AGENTS.md` | everyone | Role rules loaded into every session: the orchestrator dispatches, sub-agents work and return short summaries |
+| `../AGENTS.md` | everyone | Role rules loaded into every session: the orchestrator only dispatches; `worker` and `oracle` (reviews) follow a 3-line output contract |
 | `scripts/preflight.sh` | orchestrator (P0) | Isolated clone, metrics dir, manifest, toolchain wrapper, starts the collector |
 | `scripts/sample_server.sh` | preflight (background) | Background collector: KV gauges plus every ninfer request record |
 | `scripts/ledger.sh` | orchestrator | Appends ledger events, each with a snapshot of ninfer gauges |
@@ -52,11 +49,13 @@ P5 refactor: scaffold ─► WPs ×N ─► integrate ─► P6 features: harnes
 P7 final review ×3 lenses ─► fix tasks ─► re-review ─► P8 ship (PR)
 ```
 
-Every worker task gets its own git worktree, an adversarial reviewer, and a merger. The
+Every worker task gets its own git worktree, an adversarial reviewer, and a merger, all using
+your global pi-subagents profiles: `worker` (work and merges) and `oracle` (reviews, because it
+has bash for cargo; `reviewer` does not). The
 orchestrator is a pure dispatcher (see `../AGENTS.md`). It keeps 4 lanes in flight, matching
 ninfer's `--max-concurrency 4`, and refills a lane whenever a sub-agent finishes. Its own
-short turns briefly queue behind the lanes. Sub-agents write full reports to disk and
-return at most 10 lines. No human gates.
+short turns briefly queue behind the lanes. Sub-agents write to an output file
+(`outputMode: file-only`), and the orchestrator reads only its first 3 lines. No human gates.
 
 ## What gets measured
 
