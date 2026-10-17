@@ -42,22 +42,29 @@ errors if the file does not exist yet; the exit status of a command is ignored.
 
 ---
 
-## P0 — Setup (orchestrator, serial)
+## P0 — Setup (worker task `P0.SETUP`, serial; no review)
 
-1. **Preflight**, from your session's workspace:
-   `plan/scripts/preflight.sh <RUN_ID>`. It checks that ninfer was restarted recently, creates the
-   isolated clone `REPO`, the metrics dir `BENCH_DIR`, and the toolchain wrapper `DEV`, and it
-   starts the background collector. If it exits non-zero, **stop and report its output**.
-   Do not retry, work around it, or set override variables.
-2. Confirm that `subagent({ action: "list" })` shows `worker` and `oracle`. If either is missing, stop and report.
-3. `$L phase_start P0`, where `L` is `REPO/plan/scripts/ledger.sh` from here on.
-4. In `REPO`: `git switch -c bench/<RUN_ID> bench-base-v1`, then `mkdir -p ~/eq-wt/<RUN_ID>`.
-5. Record `DEV cargo --version`, `DEV rustc --version`, `DEV which fish`,
-   `DEV gh auth status`, and `git rev-parse HEAD` with `$L note P0 msg=...`.
-6. `DEV cargo build` in `REPO` must succeed. Then `$L phase_end P0`.
+**Orchestrator:** call `subagent({ action: "list" })` and confirm that `worker` and `reviewer`
+exist. If either is missing, report that and stop. Then dispatch `P0.SETUP` (`worker`, `cwd`
+= your session's workspace, `output` = `/tmp/<RUN_ID>-P0.SETUP.md`, because `BENCH_DIR`
+does not exist yet). When it returns `STATUS: done`, log `task_end P0.SETUP`, `phase_end P0`,
+and `phase_start P1`. On `STATUS: blocked`, report its `SUMMARY` and stop. (Preflight writes
+the run's first ledger line itself.)
+
+**P0.SETUP spec (worker):**
+1. From the workspace, run `plan/scripts/preflight.sh <RUN_ID>`. It checks that ninfer was
+   restarted recently, and creates the isolated clone `REPO`, the metrics dir `BENCH_DIR`
+   (with `reports/`, `dag/`, `fixes/`), and the toolchain wrapper `DEV`. It also starts the
+   background collector. If it exits non-zero, report `STATUS: blocked` with its last error
+   line as `SUMMARY`. Do not retry, work around it, or set override variables.
+2. `git -C <REPO> switch -c bench/<RUN_ID> bench-base-v1`, then `mkdir -p <WT_ROOT>`.
+3. `<DEV> cargo build` in `REPO` must succeed.
+4. In `Details`, record the output of `<DEV> cargo --version`, `<DEV> rustc --version`,
+   `<DEV> which fish`, `<DEV> gh auth status`, and `git -C <REPO> rev-parse HEAD`.
+5. Copy your finished output file to `<BENCH_DIR>/reports/P0.SETUP-worker-r1.md` as well.
 
 Every later phase starts with `$L phase_start <P>` and ends with `$L phase_end <P>`
-once all of its tasks, including fixes, are merged or dropped. Phases never overlap.
+(ORCHESTRATOR.md, "Phases"). Phases never overlap.
 
 ## P1 — Research: pull the guides' source markdown (fan-out ×4)
 
@@ -201,7 +208,7 @@ Reviewer must:
   gone. Exercise the behaviour contract black-box with `HOME=$(mktemp -d)`: `add`, `ls`,
   and `start`.
 - **P5.T — triage** (worker). Reads P5.Z's review. It writes
-  `$BENCH_DIR/fixes/P5.md`, with one self-contained spec per blocker or major fix (task IDs
+  `$BENCH_DIR/fixes/P5.md`, with one self-contained spec per P0 or P1 fix (task IDs
   `P5.FIXnn`, files owned disjoint where they can run in parallel), and
   `$BENCH_DIR/dag/P5-fixes.tsv`. If P5.Z passed, the DAG file is empty and P5 ends.
 
@@ -269,7 +276,7 @@ Three independent reviewer-only tasks on `RUN_BRANCH`:
 1. **P8.D1** (worker, normal review and merge): the README documents `rm`, `ls -n`,
    `ENCODE_QUEUE_DIR`, `ENCODE_QUEUE_SHELL`, `--stop-on-error`, the lock, and the new
    layout.
-2. The orchestrator logs `$L phase_end P8`.
+2. The orchestrator logs `$L phase_end P8` once P8.D1 is merged, then dispatches P8.SHIP.
 3. **P8.SHIP** (merger: `worker` in `REPO`, output `reports/P8.SHIP.md`):
    - Run all four cargo gates via `DEV`, and record any failures in `known_issues.md`.
    - Run `plan/scripts/finalize.sh`. It waits up to 15 minutes for the last RAM-tier tile.
@@ -284,5 +291,5 @@ Three independent reviewer-only tasks on `RUN_BRANCH`:
      Otherwise put the compare URL
      `https://github.com/BJSummerfield/encode_queue/compare/main...bench/<RUN_ID>` in the
      report. Do **not** merge.
-4. The orchestrator logs the P8.SHIP `task_end`, removes any remaining worktrees under
-   `~/eq-wt/<RUN_ID>`, and stops.
+   - Finally, remove every remaining worktree under `<WT_ROOT>` (`git -C <REPO> worktree remove --force`), and keep the branches.
+4. The orchestrator logs the P8.SHIP `task_end` and stops.

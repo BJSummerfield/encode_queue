@@ -1,217 +1,193 @@
 # Orchestrator rules
 
-You are the orchestrator, running in the main pi session. That session starts in a Paseo
-workspace off `main`, which you use only to run preflight. After that, all run work happens
-in `REPO`, the isolated clone that preflight creates.
-
-**You are a dispatcher.** Your whole job:
+You are the orchestrator, running in the main pi session started in a Paseo workspace off
+`main`. **You are a dispatcher and nothing else.** Your whole job:
 1. Keep 4 lanes busy with sub-agents.
 2. Log every event to the ledger at the moment it happens.
 3. Keep `STATE` current.
 
-Everything else is a sub-agent task, including writing specs, judging review findings,
-merging, resolving conflicts, and deciding what to fix. You never read source code, review
-files, notes, or plans. You act only on the short final messages sub-agents return.
+The things you may run yourself are listed in `AGENTS.md`: `subagent` calls,
+`ledger.sh`, `STATE`, and `head -n 3` on output files. Every other action, setup included, is
+a task for a sub-agent.
 
 ## Constants
 
 | Name | Value |
 |------|-------|
 | `RUN_ID` | the `RUN_ID=` line at the top of your kickoff prompt |
-| `BENCH_DIR` | `~/encode_queue_bench/<RUN_ID>` (always use the expanded absolute path) |
-| `REPO` | `~/eq-runs/<RUN_ID>`, the isolated clone made by preflight |
+| `BENCH_DIR` | `~/encode_queue_bench/<RUN_ID>` (always write the expanded absolute path) |
+| `REPO` | `~/eq-runs/<RUN_ID>`, the isolated clone created in P0 |
 | `RUN_BRANCH` | `bench/<RUN_ID>` (checked out in `REPO`) |
-| `BASE` | tag `bench-base-v1` |
-| `WT_ROOT` | `~/eq-wt/<RUN_ID>/` |
-| `DEV` | `<BENCH_DIR>/dev`, the pinned toolchain (Rust is not on PATH) |
+| `WT_ROOT` | `~/eq-wt/<RUN_ID>` |
+| `DEV` | `<BENCH_DIR>/dev`, the pinned toolchain wrapper |
 | `L` | `<REPO>/plan/scripts/ledger.sh` |
-| `STATE` | `<BENCH_DIR>/state.md`, your memory |
-| `REPORTS` | `<BENCH_DIR>/reports/`, where every sub-agent writes its full output |
-| `LANES` | **4** sub-agents in flight at once |
-| `MAX_REVIEW_ROUNDS` | **3** per task |
+| `STATE` | `<BENCH_DIR>/state.md` |
+| `OUT` | `<BENCH_DIR>/reports` |
+| `LANES` | **4** sub-agents in flight |
+| `MAX_REVIEW_ROUNDS` | **3** |
+
+## Agents
+
+Only the operator's global pi-subagents profiles. Never pass `model`.
+
+| Role | `agent` | Used for |
+|---|---|---|
+| worker | `worker` | P0 setup, research, docs, conventions, audits, planning, implementation, fixes, triage, run report |
+| merger | `worker` | every merge into `RUN_BRANCH`, every rebase, P8.SHIP |
+| reviewer | `reviewer` | every review: task reviews and the review-only tasks (P5.Z, P6.Z, P7.L1–L3, P7.Z) |
+
+**Every dispatch** is a single async `subagent` call with these parameters:
+- `agent` from the table;
+- `async: true`;
+- `context: "fresh"`;
+- `output: "<OUT>/<file>"` (absolute path) and `outputMode: "file-only"`;
+- `cwd: "<REPO>"`, except in P0 (your workspace);
+- `task` filled in from the templates below.
+
+Never use workflows, `tasks:` arrays, or chains.
 
 ## Autonomy
 
-- Never ask the human anything, and never stop to wait for input. The run ends when P8 is
-  complete.
-- Answer a sub-agent's `contact_supervisor` question only from `plan/TASKS.md`. If it needs
-  judgment, tell it to decide and record the decision in its report.
-- Never edit anything under `plan/` or `.pi/`.
+- Never ask the human anything, and never wait for input. The only early stop is P0
+  returning `STATUS: blocked`. In that case, report its `SUMMARY` line and stop.
+- Never edit anything under `plan/`.
 
 ## Isolation (hard rule; breaking it invalidates the run)
 
-- Git history may be read only for `RUN_BRANCH` and the run's own `task/<RUN_ID>/*`
-  branches. Never use `--all`, `--branches`, `--remotes`, `git branch -a`, `git ls-remote`,
-  `git reflog`, `git stash list`, or `git fetch`.
-- No `gh` except `gh auth status` (in P0 and P8) and `gh pr create` (in P8).
-- Read nothing outside `REPO`, `WT_ROOT`, and `BENCH_DIR`. That rules out other
-  directories under `~/encode_queue_bench/`, `~/eq-runs/`, `~/eq-wt/`, `~/projects/`, and
-  `~/.pi/`.
-- The only network access allowed is the four pinned P1 source URLs, fetched with `curl`.
-  No other GitHub access: in particular, not the `howtocodeit/article-md` history or any
-  other `howtocodeit` repository (`hexarch` holds a complete solution).
-- Put this paragraph verbatim at the top of every sub-agent prompt:
+Sub-agents may read git history only for `RUN_BRANCH` and `task/<RUN_ID>/*`, and may read
+nothing outside `REPO`, `WT_ROOT`, and `BENCH_DIR`. No `gh`, except in P0 and P8.SHIP.
+The only network access is the four pinned P1 source URLs, and in particular no other
+`howtocodeit` repository (`hexarch` holds a complete solution). Put this paragraph verbatim
+in every prompt:
 
 > ISOLATION: Work only inside the paths in this task. Read git history only for your own
-> branch and the run branch. Never look at other branches, tags, remotes, PRs, stashes,
-> reflog, or other directories on this machine, even if you suspect the work already
-> exists somewhere.
+> task branch and the run branch. Never look at other branches, tags, remotes, PRs, stashes,
+> reflog, or other directories on this machine, even if you suspect the work already exists
+> somewhere.
 
 ## STATE (your memory)
 
-`STATE` is a short markdown file. Keep it under about 60 lines, and overwrite it rather
-than appending. It holds:
+`STATE` is a short markdown file. Keep it under about 60 lines, and overwrite it rather than
+appending. It holds:
 - the current phase;
-- **in flight**: task, role, round, lane, and the dispatch base SHA for each;
-- **ready queue**: tasks whose dependencies are met, in dispatch order;
-- **waiting to merge**: tasks that passed review;
-- **done**: task IDs only, with outcome (pass, escalated, dropped);
-- the path of the current DAG source (`plan/TASKS.md`, `docs/refactor/PLAN.md`, a fixes file).
+- **in flight**: task, role, round;
+- **ready queue**, in dispatch order;
+- **awaiting merge**;
+- **done**: task IDs only, each with its outcome (pass, escalated, or dropped);
+- the current DAG source (a `plan/TASKS.md` phase, or a `$BENCH_DIR/dag/*.tsv`).
 
-Re-read `STATE` before every dispatch decision, and rewrite it after every dispatch and
-every completion. After a compaction, `STATE`, `$BENCH_DIR/ledger.jsonl`, and
-`git -C REPO log --oneline RUN_BRANCH` are all you need. Rebuild from them before acting.
+Re-read `STATE` before every decision, and rewrite it after every dispatch and completion.
+After a compaction, rebuild from `STATE` and `$BENCH_DIR/ledger.jsonl` before acting.
 
 ## The loop (continuous batching)
 
-Whenever a lane is free and the ready set is not empty, dispatch. Do not wait for a whole
-fan-out to finish.
+Whenever a lane is free and work is ready, dispatch it. Never wait for a whole fan-out to
+finish.
 
-**Ready-set priority:**
-1. merges (only one merger at a time);
+**Priority:**
+1. a merge (only one merger at a time);
 2. re-work after a FAIL;
-3. reviews of finished work;
-4. new tasks, those with the **longest remaining dependency chain** first, then oldest
-   first.
+3. reviews;
+4. new tasks with the **longest remaining dependency chain**;
+5. oldest first.
 
-**Agents:** only your global pi-subagents profiles are used. Never pass `model`, because that
-would bypass the role's settings.
+**On each completion:** run `head -n 3` on the output file, log `task_end` with the status
+or verdict, the counts, and the usage from the completion result, then update `STATE`:
 
-| Logical role | `agent` | Why |
-|---|---|---|
-| worker (implementation, research, docs, planning, triage) | `worker` | has bash, edit, write |
-| merger (merges, P8.SHIP) | `worker` | needs bash and edit in `REPO` |
-| reviewer | `oracle` | has bash to run the cargo gates; read-only; xhigh. (`reviewer` has no bash) |
-
-**Dispatch:** an **async** single subagent call with these parameters:
-- `agent` from the table;
-- `async: true`;
-- `context: "fresh"`, which is **mandatory**: `oracle` defaults to forking *your* context;
-- `output: "<REPORTS>/<file>"` (absolute path) and `outputMode: "file-only"`;
-- `cwd` set to the task's worktree (for merges and P8.SHIP: `REPO`);
-- `task` filled in from the templates below.
-
-Never use workflows, `tasks:` arrays, or chains. Log `task_start` immediately before the
-call, then update `STATE`.
-
-**On each completion:** the result is `Output saved to: <path>`. Run `head -n 3 <path>` and
-nothing more. Log `task_end` with that status or verdict, the counts, and the usage numbers
-from the completion result. Then update `STATE` and act on the outcome:
-
-| First line of output | Next |
+| First line | Next |
 |---|---|
-| worker `STATUS: done` | dispatch a reviewer, round k |
-| worker `STATUS: blocked` | log a `note`, re-dispatch once with the same prompt; if it is blocked again, treat that as a FAIL round |
+| worker `STATUS: done` | reviewer, round k |
+| worker `STATUS: blocked` | `note`, then re-dispatch once; blocked again counts as a FAIL round |
 | reviewer `VERDICT: PASS` | queue a merge |
-| reviewer `VERDICT: FAIL`, k < 3 | re-work: a worker with round k+1, pointed at that review file |
-| reviewer `VERDICT: FAIL`, k = 3 | escalate: queue a merge (the merger's gate decides), and log the escalation |
-| merger `STATUS: done` | log `merge` and `gate`, mark the task done, and unlock its dependents |
-| merger `STATUS: conflict-unresolved` or `gate-fail` | dispatch worker task `<T>-rebase` in T's worktree (spec: "plan/ORCHESTRATOR.md section Rebase task spec"), then review and merge it again. If an escalated task fails its gate, log `merge ... outcome=dropped` and drop its dependents instead |
-| file missing, or the first line is malformed | log `task_end ... status=error` and a `note`, then re-dispatch once |
+| reviewer `VERDICT: FAIL`, k < 3 | worker re-work, round k+1, pointed at that review |
+| reviewer `VERDICT: FAIL`, k = 3 | queue a merge marked `escalated` (the merger's gate decides) |
+| merger `STATUS: done` | log `merge` and `gate`, mark the task done, unlock its dependents |
+| merger `conflict-unresolved` / `gate-fail` | merger rebase task `<T>-rebase`, then review it and merge again. For an escalated task: log `merge … outcome=dropped`, and drop its dependents |
+| review-only task (`VERDICT` either way) | dispatch that phase's triage worker (TASKS.md) |
+| missing file or malformed first line | log `task_end … status=error` and a `note`, then re-dispatch once |
 
-**Phase boundaries:** log `phase_end` the moment the last task of a phase is merged or
-dropped, then `phase_start` for the next phase right away. Phases never overlap.
-
-## Git (yours: worktree bookkeeping only)
-
-- **P0**: `git -C REPO switch -c RUN_BRANCH BASE`.
-- **Before dispatching worker task `T`, round 1**:
-  `git -C REPO worktree add -b task/<RUN_ID>/<T> WT_ROOT/<T> RUN_BRANCH`. Record
-  `git -C REPO rev-parse RUN_BRANCH` in `STATE` as T's dispatch base.
-- Re-work and rebase rounds reuse the same worktree and branch.
-- **Reviewer-only tasks** (`P5.Z`, `P6.Z`, `P7.L*`, `P7.Z`) get a fresh worktree from
-  `RUN_BRANCH` and are never merged.
-- **After a task is merged or dropped**: `git -C REPO worktree remove --force WT_ROOT/<T>`.
-  Keep the branch.
-- Merging happens only through a merger task (a `worker`), one at a time, never by you.
+**Phases:** log `phase_end` the moment the last task of a phase is merged, dropped, or
+(for review-only and triage tasks) returned, then `phase_start` for the next phase right
+away. Phases never overlap.
 
 ## Prompt templates
 
-Fill these in mechanically. Never paste spec text, findings, or file contents into a
-prompt; give the path instead. The `output` parameter carries the same path as the
+Fill these in mechanically, and put the same path in the `output` parameter as in the
 `Output:` line.
 
-**Worker** (`agent: "worker"`, `cwd`: the worktree):
+**Worker** (`agent: "worker"`):
 ```
 ROLE: worker. TASK <T> round <k> — run <RUN_ID>
 <ISOLATION paragraph>
-Worktree: <WT_ROOT>/<T>   Branch: task/<RUN_ID>/<T>   Metrics dir: <BENCH_DIR>
-Toolchain: <BENCH_DIR>/dev <command>
+REPO=<REPO>  RUN_BRANCH=<RUN_BRANCH>  WT_ROOT=<WT_ROOT>  BENCH_DIR=<BENCH_DIR>  DEV=<DEV>
+Worktree: <WT_ROOT>/<T> (round 1: create it per AGENTS.md)
 Spec: <plan/TASKS.md section "<id>" | docs/refactor/PLAN.md section "<WPnn>" | <fixes file> section "<id>">
-<only if k>1:> Fix every blocker and major in: <REPORTS>/<T>-review-r<k-1>.md
-Output: <REPORTS>/<T>-worker-r<k>.md (first 3 lines per AGENTS.md)
+<only when k > 1:> Fix every P0 and P1 in: <OUT>/<T>-review-r<k-1>.md
+Output: <OUT>/<T>-worker-r<k>.md
 ```
 
-**Reviewer** (`agent: "oracle"`, `context: "fresh"`, `cwd`: the worktree):
+**Reviewer** (`agent: "reviewer"`):
 ```
-ROLE: reviewer. REVIEW <T> round <k> — run <RUN_ID>. One-shot adversarial review report per AGENTS.md; not a consultation.
+ROLE: reviewer. REVIEW <T> round <k> — run <RUN_ID>. One-shot report per AGENTS.md.
 <ISOLATION paragraph>
-Worktree: <WT_ROOT>/<T>   Diff: git diff <dispatch-base>..HEAD   Metrics dir: <BENCH_DIR>
-Toolchain: <BENCH_DIR>/dev <command>
-Spec under review: <same spec pointer as the worker>
-Worker output: <REPORTS>/<T>-worker-r<k>.md
-Output: <REPORTS>/<T>-review-r<k>.md (first 3 lines per AGENTS.md)
+REPO=<REPO>  RUN_BRANCH=<RUN_BRANCH>  WT_ROOT=<WT_ROOT>  BENCH_DIR=<BENCH_DIR>  DEV=<DEV>
+Ref to review: <task/<RUN_ID>/<T> | RUN_BRANCH for review-only tasks>
+Spec under review: <same spec pointer as the worker | the review-only task's TASKS.md section>
+<task reviews only:> Worker output: <OUT>/<T>-worker-r<k>.md
+Output: <OUT>/<T>-review-r<k>.md
 ```
-For reviewer-only tasks (`P5.Z`, `P6.Z`, `P7.L*`, `P7.Z`), use `Diff: (none — review the
-whole tree at RUN_BRANCH)` and leave out `Worker output`.
 
-**Merger** (`agent: "worker"`, `cwd`: `REPO`):
+**Merger** (`agent: "worker"`):
 ```
-ROLE: merger. MERGE <T> — run <RUN_ID>
+ROLE: merger. <MERGE | REBASE> <T> — run <RUN_ID>
 <ISOLATION paragraph>
-Run repo: <REPO>   Run branch: <RUN_BRANCH>   Task branch: task/<RUN_ID>/<T>   Review rounds: <k> (<pass|escalated>)
-Toolchain: <BENCH_DIR>/dev <command>
-Spec: plan/ORCHESTRATOR.md section "Merge task spec"
-Output: <REPORTS>/<T>-merge.md (first 3 lines per AGENTS.md)
+REPO=<REPO>  RUN_BRANCH=<RUN_BRANCH>  WT_ROOT=<WT_ROOT>  BENCH_DIR=<BENCH_DIR>  DEV=<DEV>
+Task branch: task/<RUN_ID>/<T>   Review rounds: <k> (<pass|escalated>)
+Spec: plan/ORCHESTRATOR.md section "<Merge task spec | Rebase task spec>"
+Output: <OUT>/<T>-<merge|rebase>.md
 ```
 
-## Merge task spec (read by merger workers)
+## Merge task spec (read by mergers)
 
-1. In the run repo, confirm the run branch is checked out and the tree is clean. If not,
-   stop with `STATUS: blocked`.
-2. `git merge --no-ff <task-branch> -m "Merge <T>: <summary> (review round <k>: <pass|escalated>)"`.
+1. In `REPO`, confirm that `RUN_BRANCH` is checked out and the tree is clean. If not, report
+   `STATUS: blocked`.
+2. `git merge --no-ff task/<RUN_ID>/<T> -m "Merge <T>: <summary> (review round <k>: <pass|escalated>)"`.
 3. Resolve any conflicts yourself, keeping the intent of both sides (use the task specs and
-   `docs/CONVENTIONS.md`). If you cannot resolve them with confidence, `git merge --abort`
-   and report `STATUS: conflict-unresolved`, listing the files.
-4. Post-merge gate: `<dev> cargo build` and `<dev> cargo test`. If the merge broke it, fix
-   it in a commit `<T>-merge-fix: <summary>` and gate again. If you still cannot get it
-   green, `git reset --hard ORIG_HEAD` and report `STATUS: gate-fail`.
-5. `STATUS: done` with the merge SHA. In `Details`: conflicted files, how you resolved them,
-   and the gate tails.
+   `docs/CONVENTIONS.md`). If you cannot resolve them confidently, `git merge --abort` and
+   report `STATUS: conflict-unresolved`, listing the files.
+4. Gate: `<DEV> cargo fmt --check`,
+   `<DEV> cargo clippy --all-targets --all-features -- -D warnings`, `<DEV> cargo test`, and
+   `<DEV> cargo build --release`. If the merge broke a gate, fix it in a commit
+   `<T>-merge-fix: <summary>` and gate again. If you still cannot get it green,
+   `git reset --hard ORIG_HEAD` and report `STATUS: gate-fail`.
+5. On success, remove T's worktree: `git -C <REPO> worktree remove --force <WT_ROOT>/<T>`.
+   Keep the branch.
+6. Report `STATUS: done` with the merge SHA. `Details`: the conflicted files, how you resolved
+   them, and the gate tails.
 
-## Rebase task spec (read by `<T>-rebase` workers)
+## Rebase task spec (read by mergers)
 
-In T's worktree, `git merge <RUN_BRANCH>` into the task branch, resolve every conflict while
-keeping T's spec intact, and make all of T's worker gates green. Commit, then report
+In `<WT_ROOT>/<T>`, `git merge <RUN_BRANCH>` into the task branch. Resolve every conflict
+while keeping T's spec intact, and make the four gates green. Commit, then report
 `STATUS: done`.
 
 ## Ledger (mandatory, written as things happen)
 
-`$L` appends to `$BENCH_DIR/ledger.jsonl` and timestamps every line itself. Never backfill
-entries, never batch them, and never log an event you did not just observe.
+`$L` timestamps every line itself. Never backfill, never batch, and never log an event you
+did not just observe.
 
 ```
 $L phase_start <PHASE>
 $L phase_end   <PHASE>
 $L task_start  <T> worker|reviewer|merger round=<k>
 $L task_end    <T> worker   round=<k> status=done|blocked|error  <usage>
-$L task_end    <T> reviewer round=<k> verdict=PASS|FAIL blockers=<n> majors=<n> minors=<n>  <usage>
-$L task_end    <T> merger   status=done|conflict-unresolved|gate-fail|blocked|error  <usage>
+$L task_end    <T> reviewer round=<k> verdict=PASS|FAIL p0=<n> p1=<n> p2=<n>  <usage>
+$L task_end    <T> merger   status=done|blocked|conflict-unresolved|gate-fail|error  <usage>
 $L merge       <T> rounds=<k> outcome=pass|escalated|dropped
 $L gate        <T> result=pass|fail
 $L note        <T> msg="<one line>"
 ```
 
 `<usage>` = `input_tokens=<n> output_tokens=<n> cache_read_tokens=<n> turns=<n>
-tool_calls=<n> duration_ms=<n>`, taken from the completion result. Leave out any field it
-does not report. Never write 0 for a missing value, and never estimate.
+tool_calls=<n> duration_ms=<n>`, taken from the completion result. Leave out any field that is
+missing. Never write 0 for a missing value, and never estimate.

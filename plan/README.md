@@ -26,7 +26,7 @@ changes during a run.
 | `ORCHESTRATOR.md` | orchestrator | Continuous batching, git/worktrees, review loop, ledger |
 | `TASKS.md` | everyone | Phase/task DAG, specs, acceptance criteria |
 | `EVALUATION.md` | final judge (Opus/Fable) | Rubric for comparing the runs |
-| `../AGENTS.md` | everyone | Role rules loaded into every session: the orchestrator only dispatches; `worker` and `oracle` (reviews) follow a 3-line output contract |
+| `../AGENTS.md` | everyone | Role rules loaded into every session: the orchestrator only dispatches; `worker` (work, merges) and `reviewer` (reviews) follow a 3-line output contract |
 | `scripts/preflight.sh` | orchestrator (P0) | Isolated clone, metrics dir, manifest, toolchain wrapper, starts the collector |
 | `scripts/sample_server.sh` | preflight (background) | Background collector: KV gauges plus every ninfer request record |
 | `scripts/ledger.sh` | orchestrator | Appends ledger events, each with a snapshot of ninfer gauges |
@@ -50,8 +50,8 @@ P7 final review ×3 lenses ─► fix tasks ─► re-review ─► P8 ship (PR)
 ```
 
 Every worker task gets its own git worktree, an adversarial reviewer, and a merger, all using
-your global pi-subagents profiles: `worker` (work and merges) and `oracle` (reviews, because it
-has bash for cargo; `reviewer` does not). The
+your global pi-subagents profiles: `worker` (work, merges, setup) and `reviewer` (reviews; your
+override gives it bash, so it runs cargo and the binary). The
 orchestrator is a pure dispatcher (see `../AGENTS.md`). It keeps 4 lanes in flight, matching
 ninfer's `--max-concurrency 4`, and refills a lane whenever a sub-agent finishes. Its own
 short turns briefly queue behind the lanes. Sub-agents write to an output file
@@ -110,7 +110,7 @@ stay where they are.
 
 **2. Start the run in Paseo.** Create a new workspace off `main`, open a pi session, and
 paste `KICKOFF.md` with the `RUN_ID=` line set. Accept project trust if pi asks. That's
-it. In P0 the orchestrator runs `plan/scripts/preflight.sh`, which:
+it. In P0 the orchestrator dispatches a setup `worker` that runs `plan/scripts/preflight.sh`, which:
 - stops the run if ninfer has been up more than 2 hours (i.e. step 1 was skipped);
 - creates the isolated clone `~/eq-runs/<run-id>` and checks it equals `bench-base-v1`;
 - creates `~/encode_queue_bench/<run-id>/` with the manifest (including the server config)

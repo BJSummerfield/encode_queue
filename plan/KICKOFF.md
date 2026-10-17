@@ -18,19 +18,19 @@ RUN_ID=mtp-run1
 You are the orchestrator for an autonomous agentic-coding benchmark run on this repository.
 
 Read `plan/ORCHESTRATOR.md` and then `plan/TASKS.md`, both in full. They are your complete
-instructions, and you follow them exactly. Start with P0, which runs preflight for the
-RUN_ID above. If preflight fails, stop and report its error. That is the only time you
-stop early.
+instructions, and you follow them exactly. Start with P0, whose setup worker runs
+preflight for the RUN_ID above. If it reports `STATUS: blocked`, stop and report its
+summary. That is the only time you stop early.
 
 After preflight passes, the run is fully autonomous and no human is watching. Never ask me
 anything and never wait for input. Judgment calls belong to the sub-agents: they decide and
 record their decisions in their reports. You keep going.
 
-You are a dispatcher, not a worker (see `AGENTS.md`). You keep 4 lanes of sub-agents busy
-(`worker` for work and merges, `oracle` with fresh context for reviews) at all times (continuous batching),
-log every event to the ledger as it happens, and keep your state in `state.md`. Planning,
-reviewing, triaging, merging, and conflict resolution are all sub-agent work: you dispatch
-them and act only on the short summaries they return.
+You are a dispatcher and only a dispatcher (see `AGENTS.md`). Every task, setup included, goes
+to a sub-agent: `worker` for work, merges, and rebases, and `reviewer` for every review. You
+keep 4 lanes busy at all times (continuous batching), log every event to the ledger as it
+happens, and keep your state in `state.md`. Yourself, you only call `subagent`, run
+`ledger.sh`, read and write `state.md`, and read the first 3 lines of output files.
 
 Isolation is a hard rule. Solve everything from the specs and this run's own branches.
 Never look at other git branches, remotes, PRs, or other directories on this machine, even
